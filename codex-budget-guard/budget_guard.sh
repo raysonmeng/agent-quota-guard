@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# budget_guard.sh —— 额度守卫(Claude Code / Codex 通用核心)
+#
+# 用法:  budget_guard.sh <agent> <phase>
+#   agent : claude | codex
+#   phase : prompt | pre | post | stop | resume
+#           prompt  = UserPromptSubmit  (检测 /goal /loop /batch,给规划预估)
+#           pre     = PreToolUse        (硬线拦新工作,放行写 checkpoint)
+#           post    = PostToolUse       (记录消耗速率,软线提示收尾)
+#           stop    = Stop / SubagentStop (循环轮末:重估,硬线强制停在干净点)
+#           resume  = SessionStart      (注入上次 checkpoint,续接)
+#
+# 设计原则:
+#   · 静默优先:util < 软线 时,除「长任务启动预估」外一律不出声。
+#   · fail-open:查不到用量(网络/token/字段)一律放行,绝不卡死 agent。
+#   · 杜绝硬切:硬线只在「轮末」强制停,并放行写 checkpoint,从不在执行中途切。
+#   · 这套不能绕过限额,只能提前停在干净点 + 续接。
+#
+# 依赖: bash curl jq awk  (macOS 还用 security 读 Keychain)
+
+set -uo pipefail
+AGENT="${1:-}"; PHASE="${2:-}"
+
+# ───────── 可调参数 ─────────
+SOFT="${BUDGET_SOFT:-78}"                  # 软线:开始提示收尾
+HARD="${BUDGET_HARD:-88}"                  # 硬线:轮末强制停(留 ~12% 安全垫)
+CACHE_TTL="${BUDGET_CACHE_TTL:-45}"        # 用量缓存秒
+HIST_WINDOW="${BUDGET_HIST_WINDOW:-900}"   # 速率估算回看窗口(秒,默认 15min)
+CHECKPOINT="${BUDGET_CHECKPOINT:-.agent/checkpoint.md}"
+CODEX_USAGE_URL="${BUDGET_CODEX_URL:-https://chatgpt.com/backend-api/codex/usage}"
+STATE_DIR="${BUDGET_STATE_DIR:-$HOME/.budget-guard}"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+command -v jq >/dev/null 2>&1 || exit 0    # 没 jq 就静默放行
+INPUT="$(cat 2>/dev/null || true)"
+
+# ───────── 取用量:回显 "util reset_epoch"(带缓存)─────────
+fetch_usage() {
+  local cache="$STATE_DIR/usage_${AGENT}.json" now ts token creds resp util reset
+  now=$(date +%s)
+  if [[ -f "$cache" ]]; then
+    ts=$(jq -r '.ts // 0' "$cache" 2>/dev/null || echo 0)
+    if (( now - ts < CACHE_TTL )); then
+      jq -r '"\(.util) \(.reset // 0)"' "$cache" 2>/dev/null; return
+    fi
+  fi
+  case "$AGENT" in
+    claude)
+      if [[ "$(uname)" == "Darwin" ]]; then
+        creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+      else
+        creds=$(cat "$HOME/.claude/.credentials.json" 2>/dev/null || true)
+      fi
+      token=$(printf '%s' "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null || true)
+      [[ -z "$token" ]] && return
+      resp=$(curl -s --max-time 4 "https://api.anthropic.com/api/oauth/usage" \
+        -H "Authorization: Bearer $token" -H "anthropic-beta: oauth-2025-04-20" \
+        -H "Content-Type: application/json" 2>/dev/null || true)
+      util=$(printf '%s' "$resp" | jq -r \
+        '[.five_hour.utilization, .seven_day.utilization]|map(select(.!=null))|max // empty' 2>/dev/null || true)
+      # 取最近的一个 reset 时间(秒级 epoch);字段名按实际返回调整
+      reset=$(printf '%s' "$resp" | jq -r \
+        '[.five_hour.resets_at, .five_hour.reset_at, .seven_day.resets_at]|map(select(.!=null))|.[0] // empty' 2>/dev/null || true)
+      ;;
+    codex)
+      token=$(jq -r '.tokens.access_token // .access_token // .OPENAI_API_KEY // empty' \
+        "$HOME/.codex/auth.json" 2>/dev/null || true)
+      [[ -z "$token" ]] && return
+      resp=$(curl -s --max-time 4 "$CODEX_USAGE_URL" \
+        -H "Authorization: Bearer $token" -H "Content-Type: application/json" 2>/dev/null || true)
+      util=$(printf '%s' "$resp" | jq -r \
+        '[.. | objects | (.used_percent? // .utilization? // .percent_used?)]|map(select(.!=null))|max // empty' 2>/dev/null || true)
+      reset=$(printf '%s' "$resp" | jq -r \
+        '[.. | objects | (.resets_at? // .reset_at?)]|map(select(.!=null))|.[0] // empty' 2>/dev/null || true)
+      ;;
+    *) return ;;
+  esac
+  [[ -z "$util" ]] && return
+  util=$(printf '%s' "$util" | awk '{v=$1; if(v<=1)v=v*100; printf "%d", v}')
+  # reset 可能是 ISO 字符串或 epoch;非数字就置 0(后面 fallback 估 5h 窗口)
+  [[ ! "$reset" =~ ^[0-9]+$ ]] && reset=0
+  printf '{"ts":%s,"util":%s,"reset":%s}' "$now" "$util" "$reset" > "$cache" 2>/dev/null || true
+  printf '%s %s' "$util" "$reset"
+}
+
+# ───────── 记录一条速率历史点 ─────────
+record_point() {
+  local util="$1" now; now=$(date +%s)
+  local h="$STATE_DIR/hist_${AGENT}.jsonl"
+  printf '{"ts":%s,"util":%s}\n' "$now" "$util" >> "$h" 2>/dev/null || true
+  tail -n 60 "$h" > "$h.tmp" 2>/dev/null && mv "$h.tmp" "$h" 2>/dev/null || true
+}
+
+# ───────── 估算:还能跑多少秒(到硬线)。回显秒数,-1 表示充足/无法估 ─────────
+seconds_to_hard() {
+  local util_now="$1" h="$STATE_DIR/hist_${AGENT}.jsonl" now; now=$(date +%s)
+  [[ -f "$h" ]] || { echo -1; return; }
+  # 在回看窗口内取最早点与当前点,两点法算速率(%/秒)
+  awk -v now="$now" -v win="$HIST_WINDOW" -v cur="$util_now" -v hard="$HARD" '
+    { ts[NR]=$0 }
+    END{
+      # 解析每行 ts/util
+      n=0
+      for(i=1;i<=NR;i++){
+        line=ts[i]
+        match(line, /"ts":[0-9]+/);   t=substr(line,RSTART+5,RLENGTH-5)+0
+        match(line, /"util":[0-9]+/); u=substr(line,RSTART+7,RLENGTH-7)+0
+        if(now-t<=win){ if(n==0){t0=t;u0=u} ; n++; tl=t; ul=u }
+      }
+      if(n<2){print -1; exit}
+      dt=tl-t0; du=ul-u0
+      if(dt<=0 || du<=0){print -1; exit}      # 没在涨 => 充足
+      rate=du/dt                               # %/秒
+      remain=(hard-cur)/rate
+      if(remain<0)remain=0
+      printf "%d", remain
+    }' "$h"
+}
+
+fmt_clock() { # epoch -> HH:MM(本地);0 -> "未知"
+  local e="$1"; [[ "$e" =~ ^[0-9]+$ ]] && (( e>0 )) || { echo "未知"; return; }
+  date -d "@$e" +%H:%M 2>/dev/null || date -r "$e" +%H:%M 2>/dev/null || echo "未知"
+}
+fmt_dur() { # 秒 -> "约 N 分钟" / "约 N 小时"
+  local s="$1"; (( s<0 )) && { echo "充足"; return; }
+  if (( s<5400 )); then echo "约 $(( (s+59)/60 )) 分钟"; else echo "约 $(awk -v s="$s" 'BEGIN{printf "%.1f", s/3600}') 小时"; fi
+}
+
+# 取用量
+read -r UTIL RESET <<<"$(fetch_usage)"
+[[ -z "${UTIL:-}" || ! "$UTIL" =~ ^[0-9]+$ ]] && exit 0   # 查不到 -> 静默放行
+
+# ───────── prompt:长任务启动预估(唯一「额度充足也提示」的情形)─────────
+if [[ "$PHASE" == "prompt" ]]; then
+  text=$(printf '%s' "$INPUT" | jq -r '.prompt // .user_prompt // .tool_input.prompt // empty' 2>/dev/null || true)
+  if printf '%s' "$text" | grep -Eq '(^|[[:space:]])/(goal|loop|batch|background)([[:space:]]|$)'; then
+    record_point "$UTIL"
+    secs=$(seconds_to_hard "$UTIL")
+    est="按当前剩余额度(已用 ${UTIL}%),"
+    if (( secs >= 0 )); then est+="以最近的消耗速率估算大约还能自主跑 $(fmt_dur "$secs")"; else est+="额度宽裕"; fi
+    est+="。额度刷新时间 $(fmt_clock "$RESET")。建议把目标切成能在该时长内完成的小块,每块结束写一次 ${CHECKPOINT};若可能超时,先做最关键的部分。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$est" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
+    else
+      # Codex:用 systemMessage 给用户看(其 UserPromptSubmit 注入 agent 的能力按版本而定)
+      jq -n --arg m "[额度预估] $est" '{systemMessage:$m}'
+    fi
+  fi
+  exit 0
+fi
+
+# ───────── resume:注入 checkpoint ─────────
+if [[ "$PHASE" == "resume" ]]; then
+  [[ -f "$CHECKPOINT" ]] || exit 0
+  body="$(cat "$CHECKPOINT" 2>/dev/null || true)"; [[ -z "$body" ]] && exit 0
+  msg="【续接】发现上次未完成任务的 checkpoint(当前已用 ${UTIL}%)。从「下一步」继续,「已完成」的不要重做:
+
+${body}"
+  jq -n --arg c "$msg" '{hookSpecificOutput:{hookEventName:"SessionStart", additionalContext:$c}}'
+  exit 0
+fi
+
+# ───────── pre:硬线拦新工作,放行写 checkpoint ─────────
+if [[ "$PHASE" == "pre" ]]; then
+  if (( UTIL >= HARD )); then
+    tgt=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null || true)
+    if [[ -n "$tgt" ]] && printf '%s' "$tgt" | grep -q "$(basename "$CHECKPOINT")"; then exit 0; fi
+    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)。停止新工作:1) 把进度写入 ${CHECKPOINT}(写文件不拦);2) 用文字告诉我续接点;3) 不要再跑命令或换工具绕。刷新后(约 $(fmt_clock "$RESET"))发「继续」即可接上。"
+    jq -n --arg x "$r" '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny", permissionDecisionReason:$x}}'
+  fi
+  exit 0
+fi
+
+# ───────── post:记录速率;软线提示收尾 ─────────
+if [[ "$PHASE" == "post" ]]; then
+  record_point "$UTIL"
+  if (( UTIL >= SOFT && UTIL < HARD )); then
+    secs=$(seconds_to_hard "$UTIL")
+    note="额度已用 ${UTIL}%(软线 ${SOFT}%),预计还能跑 $(fmt_dur "$secs")。收尾手头这步,把进度写进 ${CHECKPOINT} 准备暂停,别等硬线被打断。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$note" '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}'
+    else
+      jq -n --arg m "$note" '{systemMessage:$m}'
+    fi
+  fi
+  exit 0
+fi
+
+# ───────── stop:循环轮末重估;硬线则强制停在干净点 + 留待续状态给 watchdog ─────────
+if [[ "$PHASE" == "stop" ]]; then
+  record_point "$UTIL"
+  if (( UTIL >= HARD )); then
+    # 写待续状态(watchdog 用)
+    sid=$(printf '%s' "$INPUT" | jq -r '.session_id // .thread_id // empty' 2>/dev/null || true)
+    jq -n --arg sid "$sid" --arg cwd "$(pwd)" --arg reset "$RESET" --arg util "$UTIL" \
+      '{status:"paused", agent:env.AGENT, session_id:$sid, cwd:$cwd, reset:($reset|tonumber? // 0), util:($util|tonumber), at:(now|floor)}' \
+      > "$STATE_DIR/pending_${AGENT}.json" 2>/dev/null || true
+    stop="额度达硬线(${UTIL}%),已在本轮末尾干净停下并保存续接点。额度刷新约 $(fmt_clock "$RESET");之后发「继续」或由 watchdog 自动续跑。"
+    jq -n --arg s "$stop" '{continue:false, stopReason:$s}'
+  elif (( UTIL >= SOFT )); then
+    secs=$(seconds_to_hard "$UTIL")
+    jq -n --arg m "额度 ${UTIL}%,预计还能跑 $(fmt_dur "$secs")。建议本轮收尾并写 ${CHECKPOINT}。" '{systemMessage:$m}'
+  fi
+  exit 0
+fi
+
+exit 0
