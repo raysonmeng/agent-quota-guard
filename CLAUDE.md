@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `budget_guard.sh` —— 两包**逐字节相同**。靠 `$1`(`claude`|`codex`)切换 token 来源和 usage 端点,靠 `$2`(phase)切换行为。
 - `watchdog.sh` —— 两包**逐字节相同**。
 - `budget-probe` —— 两包**逐字节相同**。统一取数/解析入口,供 hook、watchdog、MCP 共用。
-- `install.sh` —— **唯一真正分叉的文件**:CC 版写 `~/.claude/settings.json`(hook 在 `.hooks` 下)+ `CLAUDE.md`;Codex 版写 `~/.codex/hooks.json` 的 `{"hooks":{...}}` 结构、注册 `budget-guard` MCP server 并写 `tool_timeout_sec`、写 `AGENTS.md`。
+- `install.sh` —— **唯一真正分叉的文件**:CC 版写 `~/.claude/settings.json`(hook 在 `.hooks` 下)+ `CLAUDE.md`;Codex 版写 `~/.codex/config.toml` 的 `[hooks]`(TOML 数组表 `[[hooks.PreToolUse]]` 等)、注册 `budget-guard` MCP server 并写 `tool_timeout_sec`、写 `AGENTS.md`(并清理旧 `hooks.json`——Codex 不读它)。
 
   > 改任一脚本时,若改的是 `budget_guard.sh`/`watchdog.sh`/`budget-probe`,**必须同步两个目录的副本**(它们是复制而非软链)。`install.sh` 则需分别处理两个分叉版本。
 

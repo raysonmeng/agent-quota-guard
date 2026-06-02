@@ -7,3 +7,6 @@
 
 # guard 运行期产物(若有人在仓库内跑长任务)
 .agent/
+
+# Node 依赖(MCP server 的 @modelcontextprotocol/sdk 等)
+node_modules/

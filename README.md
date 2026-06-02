@@ -88,7 +88,7 @@ token-budget-guard/
 │   ├── budget_guard.sh       ← 核心守卫(claude 模式)
 │   └── watchdog.sh           ← 可选:额度刷新后自动续跑
 └── codex-budget-guard/       ← Codex 包(整个目录可独立拿走)
-    ├── install.sh            ← Codex 安装器(配 hooks.json/MCP + 写 AGENTS.md + 部署脚本)
+    ├── install.sh            ← Codex 安装器(配 config.toml [hooks]/MCP + 写 AGENTS.md + 部署脚本)
     ├── budget-probe          ← 统一用量探针(guard/watchdog/MCP 共用)
     ├── mcp-server.mjs        ← stdio MCP server(check_budget/wait_until_budget_refresh)
     ├── mcp-tools.mjs         ← MCP 工具实现
@@ -120,7 +120,8 @@ cd claude-budget-guard
 cd codex-budget-guard
 ./install.sh
 ```
-- 把 hook 合并进 `~/.codex/hooks.json` 的 `{"hooks":{...}}` 结构,注册 `budget-guard` MCP server,协议写进 `~/.codex/AGENTS.md`。
+- 把 hook 合并进 `~/.codex/config.toml` 的 `[hooks]`(TOML 数组表 `[[hooks.PreToolUse]]` 等),注册 `budget-guard` MCP server,协议写进 `~/.codex/AGENTS.md`。
+- ⚠ **Codex 守卫仅交互 TUI 生效**:真机 E2E 实证 `codex exec`(headless,0.135.0)不触发 lifecycle hooks——headless 自主任务得不到 pre/post/stop,但 watchdog 续接(`codex exec resume`)仍可用。
 - 重开会话 `/hooks` 验证;`codex mcp get budget-guard` 验证 `tool_timeout_sec` 足够大。
 - 卸载:`./install.sh --uninstall`
 
@@ -194,7 +195,8 @@ watchdog 变量:
 ### 必须在真机确认
 - [ ] **Anthropic usage 端点的 reset 字段名**。脚本里 `resets_at` / `reset_at` 是按惯例猜的。判断方法:装完第一次摸到软线时,如果预估里「刷新时间」显示「未知」,就是字段名要改——抓一次 `api/oauth/usage` 的真实返回对一下 `fetch_usage()` 里的 jq。
 - [x] **Codex usage 端点真实 URL + 返回字段名**。已按 CodexBar/真机实证改为 `GET https://chatgpt.com/backend-api/wham/usage`,字段为 `rate_limit.primary_window/secondary_window` 与 `additional_rate_limits[]` 的 `used_percent/reset_at/reset_after_seconds`。
-- [x] **Codex `hooks.json` 外层结构**。当前 Codex 源码要求 `{"hooks": { … }}`;安装器已按该结构写入并迁移旧顶层事件名。
+- [x] **Codex hook 配置位置**。真机实证:Codex 用户 hook 从 `~/.codex/config.toml` 的 `[hooks]`(TOML 数组表)加载,**不读 `hooks.json`**;安装器已改写 config.toml [hooks] 并对旧 hooks.json 做清理。
+- [x] **Codex hook 触发面**(真机 E2E):交互 TUI 触发 PreToolUse(deny 生效);`codex exec`(0.135.0)**不触发** lifecycle hooks。守卫定位=Codex 仅交互 TUI;headless 靠 watchdog 续接。
 - [ ] **`/goal` 的 Stop hook 与官方 evaluator 的优先级**。我们用 `continue:false` 强停,但多个 Stop hook 与官方 goal evaluator 的交互没真机验证过,确认 `continue:false` 是否稳定压过 evaluator 让循环停。
 
 ### 已知局限(值得修)

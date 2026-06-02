@@ -263,6 +263,23 @@
   </tbody>
 </table>
 
+<h2 id="verified"><span class="n">8.5</span>已验证范围 & 限制(真机 E2E 结论 · 诚实边界)</h2>
+<div class="note ok"><strong>已真机 E2E 验证(可依赖):</strong>
+<ul>
+  <li><strong>Claude 守卫全套</strong>:<code>pre</code> 硬线 deny、<code>pre</code> 精确放行 checkpoint、<code>stop</code> 硬停(写 pending)—— tmux 真 <code>claude -p</code> 实测。</li>
+  <li><strong>C3 watchdog 续接(双家)</strong>:claude <code>--resume</code> + checkpoint STEP 1→2;codex <code>exec resume</code> + secret + thread_id 一致 —— 两家都证了<strong>上下文连续</strong>(非新会话)。这是<strong>可靠的无人值守续接路径</strong>。</li>
+  <li><strong>doctor 双家</strong>:真端点全 bucket 解析(claude seven_day / codex primary_window + additional_rate_limits[Spark])。</li>
+  <li><strong>Codex 守卫(交互 TUI)</strong>:TUI 里 PreToolUse 真触发 + <code>deny</code> + marker 不生成。</li>
+  <li>解析 / 三档 / fingerprint / checkpoint 安全 / cache CAS:85 单测 + 10 MCP 单测全过。</li>
+</ul></div>
+<div class="note bad"><strong>已知限制(不要声称覆盖):</strong>
+<ul>
+  <li><strong>Codex 守卫仅交互 TUI 可用</strong>。<code>codex exec</code>(headless,如 0.135.0)<strong>不触发 lifecycle hooks</strong>——hooks.json/config.toml 均试、feature enabled、bypass-trust、关 unified_exec 都无效。所以 headless codex 自主任务<strong>得不到 pre/post/stop 守卫</strong>(但 C3 watchdog 续接仍可用)。</li>
+  <li><strong>C4(阻塞 MCP 工具 park)= 交互/experimental</strong>。机制已验(直接调 + SDK E2E:park→flip→ready),但真 agent 在 headless 调用两家都不通(claude <code>-p</code> 不调长阻塞工具;codex <code>exec</code> 在 handler 前 <code>user cancelled</code>)。C4 的真实用途是交互会话;headless 续接走 C3。</li>
+  <li><code>codex exec</code> 跑 MCP 工具需顶层 <code>--ask-for-approval never</code>(非交互默认取消)。</li>
+  <li>out-of-cwd 绝对 checkpoint 的祖先目录 symlink 不查(非默认配置);cache CAS 未做多进程压测;Node 侧 burn-rate 未实现(bash 专属)。</li>
+</ul></div>
+
 <h2 id="bugs"><span class="n">9</span>现有代码的真实问题(均已实证)</h2>
 <table>
   <thead><tr><th>级别</th><th>问题</th><th>证据</th></tr></thead>
