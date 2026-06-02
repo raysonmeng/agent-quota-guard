@@ -1,0 +1,339 @@
+#!/usr/bin/env bash
+# budget-probe —— normalize subscription usage for guard/watchdog/MCP.
+
+set -uo pipefail
+
+AGENT=""
+if [[ "${1:-}" == "--agent" ]]; then
+  AGENT="${2:-}"
+else
+  AGENT="${1:-}"
+fi
+
+STATE_DIR="${BUDGET_STATE_DIR:-$HOME/.budget-guard}"
+CACHE_TTL="${BUDGET_CACHE_TTL:-45}"
+NOW="${BUDGET_NOW_EPOCH:-$(date +%s)}"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+
+command -v jq >/dev/null 2>&1 || {
+  printf '{"ok":false,"agent":"%s","error":"missing_jq"}\n' "$AGENT"
+  exit 3
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: budget-probe <claude|codex>
+       budget-probe --agent <claude|codex>
+
+Environment:
+  BUDGET_USAGE_FIXTURE=/path/raw-usage.json  Use fixture instead of network.
+  BUDGET_NOW_EPOCH=1760000000               Freeze current time for tests.
+  BUDGET_STATE_DIR=~/.budget-guard          Cache/rate-limit state.
+EOF
+}
+
+json_error() {
+  local code="$1" msg="$2"
+  jq -n --arg agent "$AGENT" --arg code "$code" --arg msg "$msg" \
+    --argjson now "$NOW" \
+    '{ok:false, agent:$agent, error:$code, message:$msg, fetched_at:$now, now_epoch:$now}'
+}
+
+cache_path() { printf '%s/probe_%s.json' "$STATE_DIR" "$AGENT"; }
+rl_path() { printf '%s/probe_%s_rate_limit.json' "$STATE_DIR" "$AGENT"; }
+
+with_lock() {
+  local lock="$STATE_DIR/probe_${AGENT}.lock" waited=0 rc
+  while ! mkdir "$lock" 2>/dev/null; do
+    sleep 0.1
+    waited=$((waited + 1))
+    (( waited > 50 )) && break
+  done
+  "$@"; rc=$?
+  rmdir "$lock" 2>/dev/null || true
+  return "$rc"
+}
+
+codex_usage_url() {
+  local base cfg="$HOME/.codex/config.toml"
+  base="${BUDGET_CODEX_URL:-}"
+  if [[ -z "$base" && -f "$cfg" ]]; then
+    base=$(awk -F= '
+      $1 ~ /^[[:space:]]*chatgpt_base_url[[:space:]]*$/ {
+        value=$2
+        sub(/#.*/, "", value)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+        gsub(/^"|"$/, "", value)
+        print value
+        exit
+      }' "$cfg")
+  fi
+  base="${base:-https://chatgpt.com/backend-api/}"
+  base="${base%/}"
+  if [[ "$base" == */wham/usage || "$base" == */api/codex/usage ]]; then
+    printf '%s\n' "$base"
+    return
+  fi
+  if [[ "$base" == https://chatgpt.com* || "$base" == https://chat.openai.com* ]]; then
+    [[ "$base" == *"/backend-api"* ]] || base="$base/backend-api"
+  fi
+  if [[ "$base" == *"/backend-api"* ]]; then
+    printf '%s/wham/usage\n' "$base"
+  else
+    printf '%s/api/codex/usage\n' "$base"
+  fi
+}
+
+read_codex_auth() {
+  local auth="${BUDGET_CODEX_AUTH_JSON:-$HOME/.codex/auth.json}"
+  [[ -f "$auth" ]] || return 1
+  jq -r '[.tokens.access_token // .access_token // empty, .tokens.account_id // .account_id // empty] | @tsv' "$auth" 2>/dev/null
+}
+
+read_claude_token() {
+  local creds token
+  if [[ "$(uname)" == "Darwin" ]]; then
+    creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+  else
+    creds=$(cat "$HOME/.claude/.credentials.json" 2>/dev/null || true)
+  fi
+  token=$(printf '%s' "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null || true)
+  [[ -n "$token" ]] && printf '%s\n' "$token"
+}
+
+curl_usage() {
+  local tmp_body tmp_hdr status retry_after url token account_id auth_line
+  tmp_body=$(mktemp "${TMPDIR:-/tmp}/budget-probe-body.XXXXXX")
+  tmp_hdr=$(mktemp "${TMPDIR:-/tmp}/budget-probe-hdr.XXXXXX")
+  case "$AGENT" in
+    codex)
+      auth_line=$(read_codex_auth || true)
+      token="${auth_line%%$'\t'*}"
+      account_id="${auth_line#*$'\t'}"
+      [[ -z "$token" || -z "$account_id" || "$token" == "$account_id" ]] && {
+        rm -f "$tmp_body" "$tmp_hdr"
+        json_error "auth" "missing Codex access token or account_id"
+        return 2
+      }
+      url="$(codex_usage_url)"
+      status=$(curl -sS --max-time "${BUDGET_HTTP_MAX_TIME:-10}" \
+        -D "$tmp_hdr" -o "$tmp_body" -w '%{http_code}' "$url" \
+        -H "Authorization: Bearer $token" \
+        -H "ChatGPT-Account-Id: $account_id" \
+        -H "User-Agent: codex-cli" \
+        -H "Accept: application/json" 2>/dev/null || echo "000")
+      ;;
+    claude)
+      token="$(read_claude_token || true)"
+      [[ -z "$token" ]] && {
+        rm -f "$tmp_body" "$tmp_hdr"
+        json_error "auth" "missing Claude OAuth token"
+        return 2
+      }
+      url="${BUDGET_CLAUDE_URL:-https://api.anthropic.com/api/oauth/usage}"
+      status=$(curl -sS --max-time "${BUDGET_HTTP_MAX_TIME:-10}" \
+        -D "$tmp_hdr" -o "$tmp_body" -w '%{http_code}' "$url" \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "User-Agent: claude-code/${BUDGET_CLAUDE_VERSION:-unknown}" \
+        -H "Accept: application/json" 2>/dev/null || echo "000")
+      ;;
+    *)
+      rm -f "$tmp_body" "$tmp_hdr"
+      usage
+      return 4
+      ;;
+  esac
+
+  retry_after=$(awk 'BEGIN{IGNORECASE=1} /^Retry-After:/ {gsub(/\r/,""); gsub(/^[^:]+:[[:space:]]*/,""); print; exit}' "$tmp_hdr")
+  jq -n --rawfile body "$tmp_body" --arg status "$status" --arg retry "$retry_after" \
+    --arg url "$url" --argjson now "$NOW" \
+    '{http_status:($status|tonumber? // 0), retry_after:$retry, url:$url, fetched_at:$now, body:$body}'
+  rm -f "$tmp_body" "$tmp_hdr"
+}
+
+parse_retry_after() {
+  local retry="$1"
+  if [[ "$retry" =~ ^[0-9]+$ ]]; then
+    echo $((NOW + retry))
+  elif [[ -n "$retry" ]]; then
+    date -j -f "%a, %d %b %Y %H:%M:%S %Z" "$retry" +%s 2>/dev/null \
+      || date -d "$retry" +%s 2>/dev/null \
+      || echo $((NOW + 300))
+  else
+    echo $((NOW + 300))
+  fi
+}
+
+parse_usage() {
+  local raw="$1" source="$2" stale="${3:-false}" rate_limited_until="${4:-null}"
+  case "$AGENT" in
+    codex)
+      jq -c --arg agent "$AGENT" --arg source "$source" --argjson now "$NOW" \
+        --argjson stale "$stale" --argjson rlu "$rate_limited_until" '
+        def win($id; $w):
+          select($w != null) |
+          {
+            id:$id,
+            util:($w.used_percent // null),
+            reset_epoch:($w.reset_at // null),
+            reset_after_seconds:($w.reset_after_seconds // null),
+            resettable:(($w.reset_at // null) | type == "number")
+          };
+        def windows:
+          [
+            win("rate_limit.primary_window"; .rate_limit.primary_window),
+            win("rate_limit.secondary_window"; .rate_limit.secondary_window)
+          ]
+          +
+          ([.additional_rate_limits[]? as $rl |
+            ($rl.limit_name // $rl.metered_feature // "additional") as $name |
+            win("additional_rate_limits[\($name)].primary_window"; $rl.rate_limit.primary_window),
+            win("additional_rate_limits[\($name)].secondary_window"; $rl.rate_limit.secondary_window)
+          ]);
+        (windows | map(select(.util != null))) as $buckets |
+        ($buckets | map(select(.resettable)) | max_by(.util) // null) as $hard |
+        ($buckets | max_by(.util) // null) as $warn |
+        if ($buckets|length) == 0 then
+          {ok:false, agent:$agent, error:"schema", message:"no Codex usage buckets found", source:$source, fetched_at:$now, now_epoch:$now, stale:$stale, rate_limited_until:$rlu}
+        else
+          {
+            ok:true, agent:$agent,
+            util:(($hard.util // 0) | floor),
+            hard_util:(($hard.util // 0) | floor),
+            warn_util:(($warn.util // 0) | floor),
+            bucket_id:($hard.id // $warn.id // null),
+            reset_epoch:($hard.reset_epoch // null),
+            reset_after_seconds:($hard.reset_after_seconds // null),
+            buckets:$buckets,
+            source:$source, fetched_at:$now, now_epoch:$now, stale:$stale, rate_limited_until:$rlu
+          }
+        end' <<<"$raw"
+      ;;
+    claude)
+      jq -c --arg agent "$AGENT" --arg source "$source" --argjson now "$NOW" \
+        --argjson stale "$stale" --argjson rlu "$rate_limited_until" '
+        def epoch:
+          if type == "number" then floor
+          elif type == "string" then (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?)
+          else null end;
+        def bucket($id):
+          .[$id] as $b |
+          select($b != null and ($b|type) == "object" and $b.utilization != null) |
+          {
+            id:$id,
+            util:$b.utilization,
+            reset_epoch:(($b.resets_at // $b.reset_at // null) | epoch),
+            resettable:((($b.resets_at // $b.reset_at // null) | epoch) != null)
+          };
+        ["five_hour","seven_day","seven_day_oauth_apps","seven_day_opus","seven_day_sonnet","seven_day_routines","seven_day_cowork","iguana_necktie"] as $ids |
+        ([$ids[] as $id | bucket($id)] | map(select(.util != null))) as $buckets |
+        (if (.extra_usage? | type) == "object" then .extra_usage else null end) as $extra |
+        ($buckets | map(select(.resettable)) | max_by(.util) // null) as $hard |
+        ($buckets | max_by(.util) // null) as $warn |
+        if ($buckets|length) == 0 then
+          {ok:false, agent:$agent, error:"schema", message:"no Claude usage buckets found", source:$source, fetched_at:$now, now_epoch:$now, stale:$stale, rate_limited_until:$rlu, extra_usage:$extra}
+        else
+          {
+            ok:true, agent:$agent,
+            util:(($hard.util // 0) | floor),
+            hard_util:(($hard.util // 0) | floor),
+            warn_util:(($warn.util // 0) | floor),
+            bucket_id:($hard.id // $warn.id // null),
+            reset_epoch:($hard.reset_epoch // null),
+            reset_after_seconds:(if $hard.reset_epoch then ($hard.reset_epoch - $now) else null end),
+            buckets:$buckets,
+            extra_usage:$extra,
+            source:$source, fetched_at:$now, now_epoch:$now, stale:$stale, rate_limited_until:$rlu
+          }
+        end' <<<"$raw"
+      ;;
+  esac
+}
+
+probe_uncached() {
+  local fetched status body retry_until parsed cache
+  if [[ -n "${BUDGET_USAGE_FIXTURE:-}" ]]; then
+    [[ -f "$BUDGET_USAGE_FIXTURE" ]] || {
+      json_error "fixture" "BUDGET_USAGE_FIXTURE does not exist"
+      return 3
+    }
+    parse_usage "$(cat "$BUDGET_USAGE_FIXTURE")" "fixture" false null
+    return
+  fi
+
+  fetched="$(curl_usage)" || return $?
+  status=$(jq -r '.http_status // 0' <<<"$fetched")
+  body=$(jq -r '.body // empty' <<<"$fetched")
+  cache="$(cache_path)"
+
+  if [[ "$status" == "429" ]]; then
+    retry_until=$(parse_retry_after "$(jq -r '.retry_after // empty' <<<"$fetched")")
+    jq -n --argjson until "$retry_until" --argjson now "$NOW" \
+      '{rate_limited_until:$until, fetched_at:$now}' > "$(rl_path)" 2>/dev/null || true
+    if [[ -f "$cache" ]]; then
+      jq --argjson rlu "$retry_until" '.source="cache" | .stale=true | .rate_limited_until=$rlu' "$cache"
+      return 0
+    fi
+    json_error "rate_limited" "usage endpoint returned 429"
+    return 2
+  fi
+
+  if (( status < 200 || status >= 300 )); then
+    if [[ -f "$cache" ]]; then
+      jq '.source="cache" | .stale=true' "$cache"
+      return 0
+    fi
+    json_error "http" "usage endpoint returned non-2xx"
+    return 2
+  fi
+
+  if ! jq -e . >/dev/null 2>&1 <<<"$body"; then
+    if [[ -f "$cache" ]]; then
+      jq '.source="cache" | .stale=true' "$cache"
+      return 0
+    fi
+    json_error "json" "usage endpoint did not return JSON"
+    return 3
+  fi
+
+  parsed="$(parse_usage "$body" "live" false null)"
+  if jq -e '.ok == true' >/dev/null 2>&1 <<<"$parsed"; then
+    printf '%s\n' "$parsed" > "$cache" 2>/dev/null || true
+  fi
+  printf '%s\n' "$parsed"
+}
+
+main() {
+  [[ "$AGENT" == "claude" || "$AGENT" == "codex" ]] || {
+    usage
+    exit 4
+  }
+
+  local cache rl cached_ts rate_until
+  cache="$(cache_path)"
+  rl="$(rl_path)"
+  if [[ -z "${BUDGET_USAGE_FIXTURE:-}" && -f "$rl" ]]; then
+    rate_until=$(jq -r '.rate_limited_until // 0' "$rl" 2>/dev/null || echo 0)
+    if [[ "$rate_until" =~ ^[0-9]+$ ]] && (( rate_until > NOW )); then
+      if [[ -f "$cache" ]]; then
+        jq --argjson rlu "$rate_until" '.source="cache" | .stale=true | .rate_limited_until=$rlu' "$cache"
+        exit 0
+      fi
+      json_error "rate_limited" "usage endpoint is in retry-after backoff"
+      exit 2
+    fi
+  fi
+
+  if [[ -z "${BUDGET_USAGE_FIXTURE:-}" && -f "$cache" ]]; then
+    cached_ts=$(jq -r '.fetched_at // 0' "$cache" 2>/dev/null || echo 0)
+    if [[ "$cached_ts" =~ ^[0-9]+$ ]] && (( NOW - cached_ts < CACHE_TTL )); then
+      jq '.source="cache" | .stale=false' "$cache"
+      exit 0
+    fi
+  fi
+
+  with_lock probe_uncached
+}
+
+main

@@ -15,38 +15,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **一份核心,两个包,运行时参数区分 agent。** `claude-budget-guard/` 和 `codex-budget-guard/` 各含三个脚本:
 - `budget_guard.sh` —— 两包**逐字节相同**。靠 `$1`(`claude`|`codex`)切换 token 来源和 usage 端点,靠 `$2`(phase)切换行为。
 - `watchdog.sh` —— 两包**逐字节相同**。
-- `install.sh` —— **唯一真正分叉的文件**:CC 版写 `~/.claude/settings.json`(hook 在 `.hooks` 下)+ `CLAUDE.md`;Codex 版写 `~/.codex/hooks.json`(**顶层事件名,无 `hooks` 外层**)+ `AGENTS.md`,matcher 也只 `^Bash$`。
+- `budget-probe` —— 两包**逐字节相同**。统一取数/解析入口,供 hook、watchdog、MCP 共用。
+- `install.sh` —— **唯一真正分叉的文件**:CC 版写 `~/.claude/settings.json`(hook 在 `.hooks` 下)+ `CLAUDE.md`;Codex 版写 `~/.codex/hooks.json` 的 `{"hooks":{...}}` 结构、注册 `budget-guard` MCP server 并写 `tool_timeout_sec`、写 `AGENTS.md`。
 
-  > 改任一脚本时,若改的是 `budget_guard.sh`/`watchdog.sh`,**必须同步两个目录的副本**(它们是复制而非软链)。`install.sh` 则需分别处理两个分叉版本。
+  > 改任一脚本时,若改的是 `budget_guard.sh`/`watchdog.sh`/`budget-probe`,**必须同步两个目录的副本**(它们是复制而非软链)。`install.sh` 则需分别处理两个分叉版本。
 
 **phase 调度模型** —— guard 挂在五个生命周期事件上,`budget_guard.sh` 末尾的一串 `if [[ "$PHASE" == ... ]]` 分派:
 
 | phase | 挂载事件 | 行为 |
 |---|---|---|
 | `prompt` | UserPromptSubmit | 检测 `/goal /loop /batch /background`,给规划预估(**唯一**额度充足也出声的情形) |
-| `pre` | PreToolUse | 硬线 deny 新工作工具,但放行写 checkpoint(按 basename 匹配) |
+| `pre` | PreToolUse | 硬线 deny 新工作工具,只精确放行已知写文件工具写 configured checkpoint 路径 |
 | `post` | PostToolUse | 追加一条 burn-rate 历史点;软线提示收尾 |
-| `stop` | Stop/SubagentStop | 循环轮末重估;硬线 `continue:false` 强停 + 写 `pending_<agent>.json` 给 watchdog |
+| `stop` | Stop/SubagentStop | 循环轮末重估;硬线 `continue:false` 强停 + 写 `pending/<agent>_<scope>.json` 给 watchdog |
 | `resume` | SessionStart | 有上次 checkpoint 就注入上下文续接 |
 
 **核心不变量(改代码别破坏):**
 - **fail-open**:查不到用量(网络/token/字段对不上/无 `jq`)一律 `exit 0` 静默放行。绝不因守卫自身问题卡死 agent。
 - **统一走 `exit 0 + JSON`**,从不混用 `exit 2`。输出协议见 README §10。
-- **静默优先**:`util < SOFT` 时除长任务预估外一个字不冒。
+- **静默优先**:`util < WARN_ONCE` 时除长任务预估外一个字不冒。
 - **硬线只在轮末停**(`stop` phase),`pre` 只拦工具不停整轮——避免执行中途切。
 
 **数据流 / 状态目录**(默认 `~/.budget-guard/`,`BUDGET_STATE_DIR` 可覆盖):
 - `usage_<agent>.json` —— 用量缓存(`BUDGET_CACHE_TTL` 秒,默认 45;PreToolUse 每次工具调用都跑,必须缓存)。
-- `hist_<agent>.jsonl` —— burn-rate 历史点,只留最近 60 条。
-- `pending_<agent>.json` —— 硬线暂停时写的待续状态,watchdog 读它续跑。
-  > **已知缺陷**:这些都是按 agent 单文件,多项目并发撞线会互相覆盖(README §9)。涉及并发的改动须考虑改成按 `session_id`/项目路径分文件。
+- `pending/<agent>_<scope>.json` —— 硬线暂停时写的待续队列,watchdog 逐个读它续跑;旧 `pending_<agent>.json` 仅 watchdog 兼容读取。
+
+> `hist_<agent>.jsonl`(burn-rate 历史点)仅 Bash 实现(`budget_guard.sh`)写入。Node lib 不写,watchdog 不读。burn-rate 算法是 Bash 专属(`seconds_to_hard()`,纯 awk);Node lib 不实现(P2 待办)。
 
 **burn-rate 算法**(`seconds_to_hard()`,纯 awk):在 `BUDGET_HIST_WINDOW`(默认 900s)窗口内取最早点和最新点,两点法算 `rate = Δutil/Δt`,外推到 `HARD` 的剩余秒数。`rate ≤ 0` 视为充足(返回 -1)。util 归一化:`≤1` 视为 0–1 比例 ×100。
 
 **CC vs Codex 的真实差异**(改 Codex 分支前必读 README §10):
-- Codex hook 只对 Bash 命令可靠触发(apply_patch/MCP 暂不触发),所以硬线主要拦命令,而写 checkpoint 走 apply_patch 正好不被拦。
+- Codex 现版 PreToolUse 覆盖 Bash、apply_patch、MCP 和扩展工具;硬线放行 checkpoint 必须精确匹配路径,不能 basename/近似匹配。
 - CC 软提示走 `additionalContext`(给 agent 读);Codex 走 `systemMessage`(给用户看)——因 Codex PreToolUse 不支持 `additionalContext`。
-- Codex usage URL(`BUDGET_CODEX_URL`)和返回字段名**未在真机确认**(README §9),默认猜测可能不对。
+- Codex usage 端点已实证为 `https://chatgpt.com/backend-api/wham/usage`;需要 `ChatGPT-Account-Id` header,字段是 `rate_limit.primary_window/secondary_window` 和 `additional_rate_limits[]` 的 `used_percent/reset_at/reset_after_seconds`。
 
 ## 常用命令
 
@@ -73,12 +74,12 @@ diff claude-budget-guard/watchdog.sh    codex-budget-guard/watchdog.sh
 
 ## 测试状态
 
-无自动化测试文件。README §9 记录的「已验证」仅指容器内逻辑层(bash 语法、burn-rate 数学、命令检测正则、各 phase JSON 输出、安装器幂等/卸载生命周期)。**真实 usage 端点字段、真机 hook 触发、`/goal` Stop 交互、watchdog headless 续跑、Codex URL 均未验证**——涉及这些的改动需在真机带真 token 验证,不能只靠逻辑推断声称完成。
+已有 `codex-budget-guard/test/budget-mcp.test.mjs` 覆盖 Codex fixture parser 和 MCP wait loop;仍需真机验证真实 usage 端点、真机 hook 触发、`/goal` Stop/idle 交互、watchdog headless 续跑。涉及这些的改动需在真机带真 token 验证,不能只靠逻辑推断声称完成。
 
 ## 编码风格与命名
 
 - 一律 `#!/usr/bin/env bash`。安装器用 `set -euo pipefail`(快速失败);运行期 guard 用 `set -uo pipefail`(去掉 `-e`,因为大量命令以 `|| true` 兜底实现 fail-open,绝不能因单条失败退出)。
-- 配置变量全大写并统一 `BUDGET_` 前缀(`BUDGET_SOFT` `BUDGET_HARD` `BUDGET_STATE_DIR` …),全部可被环境变量覆盖、带默认值。
+- 配置变量全大写并统一 `BUDGET_` 前缀(`BUDGET_WARN_ONCE` `BUDGET_WARN_REPEAT` `BUDGET_HARD` `BUDGET_STATE_DIR` …),全部可被环境变量覆盖、带默认值。`BUDGET_SOFT` 仅作为 `WARN_REPEAT` 的 deprecated alias。
 - 函数小而动词化:`fetch_usage` `record_point` `seconds_to_hard` `fmt_clock` `fmt_dur`。
 - 面向用户的文案是**中文**——除非有意改产品语言,否则保持中文,别擅自英化。
 
@@ -92,7 +93,7 @@ diff claude-budget-guard/watchdog.sh    codex-budget-guard/watchdog.sh
 
 - **绝不**提交凭据、usage 接口返回、或来自 `~/.claude` `~/.codex` `~/.budget-guard` 的文件。
 - 安装器会写入 `~/.budget-guard`、`~/.claude`/`~/.codex`;改安装/卸载流程时在一次性 `HOME` 下验证幂等,别对用户已有配置做破坏性假设(现实现已对已有 hook 做幂等过滤 + 改前 `.bak`,保持这条)。
-- `watchdog.sh` 是无人值守跑 agent,默认 `BUDGET_WATCHDOG_ARM=0`(dry-run)。改它的续跑逻辑或权限白名单时,保持默认不武装、限权(`--allowedTools`/`--full-auto`+sandbox/`--max-turns`)、限定项目目录这几条底线。
+- `watchdog.sh` 是无人值守跑 agent,默认 `BUDGET_WATCHDOG_ARM=0`(dry-run)。改它的续跑逻辑或权限白名单时,保持默认不武装、限权(`--allowedTools`/`--sandbox workspace-write`/`--max-turns`)、限定项目目录这几条底线。
 
 ## 文档关系
 
