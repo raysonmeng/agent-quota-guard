@@ -13,13 +13,13 @@
 | P0-2 | claude `pre` 放行写 checkpoint | 95% 时写 .agent/checkpoint.md 放行、写其它文件拒 | tmux 真 claude + marker | C | ☑ tmux-checkpoint-allow-e2e.sh PASS |
 | P0-3 | claude `stop` continue:false 真停 | 95% 时 phaseStop 硬停分支真执行(写 pending + continue:false) | tmux 真 claude(Stop hook)→ 验 pending 文件写入 | C | ☑ tmux-stop-e2e.sh PASS(主证据 pending;loop-cut 由源码兜底) |
 | P0-4 | claude `resume` 注入 checkpoint | 预置 pending+checkpoint,--resume 后 agent 上下文含「续接」并从下一步继续 | tmux 真 claude --resume + marker | C | ☐ |
-| P0-5 | claude C4 park | 真 agent 任务中途调 wait_until_budget_refresh,fixture 95→20,**断言 park 期间无后续动作 + flip 后同 turn 继续**(token-free 用 MCP log+marker 时序间接证) | (1) wait_until_budget_refresh 直接调 + flip:☑ park 6s→ready;(2) MCP server SDK E2E(Codex)☑;(3) 真 claude headless 调用:◐ headless MCP 集成未跑通(claude 域,真实用途是交互) | C | ◐ 机制✓,真-agent-headless 待交互验 |
-| P0-6 | codex `pre`/`stop` 硬线 | 同 P0-1/3 但真 codex;**额外:apply_patch 纯 checkpoint 写放行、delete/multi-file/non-checkpoint 拒** | tmux 真 codex exec + fixture | X | ☐ |
-| P0-7 | codex C4 park + tool_timeout 对照 | 高 tool_timeout_sec park 成功(同 P0-5 断言) / 低值阻塞被砍(保护有效) | tmux 真 codex + MCP + fixture flip | X | ☐ |
-| P0-8 | codex 硬停 + /goal pause | goal active 撞 95,pause+deny 后不 idle 自续;省略 pause 的失败模式单独证 | tmux 真 codex TUI/exec + marker 序列 | X | ☐ |
-| P0-9✓ | C3 claude watchdog 真 resume | 武装后真起 `claude --resume <sid>`,warn_util gate,scoped pending;**用 step counter/secret 证上下文连续(非仅进程重启)** | 真机 armed watchdog + 预置 pending + 低 fixture | C | ☐ |
-| P0-10 | C3 codex watchdog 真 resume | 真 `codex exec resume <sid>`/`--last` 续 thread;**用 secret/step 证续的是同 thread 上下文,非新会话** | 真机 armed watchdog + 预置 pending | X | ☐ |
-| P0-11 | live probe doctor 双家 | 真 token 跑 doctor,全 bucket/winner/reset 类型/codex account-id header/claude model buckets | 真 token integration(脱敏) | 双(各自家) | ◐ claude ☑(全 bucket+reset 验过);codex 待 X |
+| P0-5 | claude C4 park | 真 agent 中途调 wait_until_budget_refresh,fixture 95→20,断言 park + flip 后同 turn 续 | (1) wait 直接调 + flip:☑ park→ready;(2) MCP SDK E2E(Codex)☑;(3) 真 claude `-p` headless:✗ timeout(headless runtime 不调长阻塞 MCP,与 codex exec 同款);C4 真实用途是**交互 TUI**(headless 走 C3) | C | ◐ 机制✓;真-agent 仅交互可行(headless 用 C3),交互自动化未做 |
+| P0-6 | codex `pre`/`stop` 硬线 | 同 P0-1/3 但真 codex | tmux 真 codex exec + fixture | X | ☐ **BLOCKED**:`codex exec 0.135.0` 不触发 lifecycle hooks(hooks.json + config.toml 均试,feature enabled,bypass-trust,关 unified_exec 均无效);交互 TUI 待验 |
+| P0-7 | codex C4 park + tool_timeout 对照 | 高 timeout park / 低值被砍 | tmux 真 codex + MCP + fixture flip | X | ◐ 机制✓(直接调 3s flip→ready);真 exec MCP **BLOCKED**(tool_call 在 handler 前 `user cancelled`,approval=never 也无效)= codex runtime/harness blocker |
+| P0-8 | codex 硬停 + /goal pause | goal active 撞 95,pause+deny 后不 idle 自续 | tmux 真 codex TUI/exec + marker 序列 | X | ☐ 前置(P0-6 hook)阻塞,未跑 |
+| P0-9 | C3 claude watchdog 真 resume | 武装后真起 `claude --resume <sid>`,warn_util gate,scoped pending;step 证上下文连续 | 真机 armed watchdog + 预置 pending + 低 fixture | C | ☑ session_id 一致 + checkpoint STEP=1→2(上下文连续) |
+| P0-10 | C3 codex watchdog 真 resume | 真 `codex exec resume <sid>` 续 thread,secret 证连续 | 真机 + 预置 pending | X | ☑ thread_id 019e87ab... 一致 + secret codex_resume_secret 复述(上下文连续) |
+| P0-11 | live probe doctor 双家 | 真 token 跑 doctor,全 bucket/winner/reset/account-id/model buckets | 真 token integration | 双 | ☑ claude(seven_day winner)+ codex(primary_window + additional_rate_limits[Spark])均全 bucket 解析 |
 | P0-12 | **headline 全闭环** | 设 goal→80 once→90 repeat→95 stop+checkpoint→C4 或 C3 刷新→自动续完成 | tmux 端到端 + fixture 时间压缩;claude 版 C、codex 版 X | 双 | ☐ |
 
 ## P1 — 应测(单测/dry-run/集成,不必烧真 token)

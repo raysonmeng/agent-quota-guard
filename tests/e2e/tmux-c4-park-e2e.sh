@@ -28,7 +28,9 @@ MARK="$work/DONE_AFTER_WAIT.txt"
 probe="$state/probe-wrap.sh"
 cat > "$probe" <<WRAP
 #!/usr/bin/env bash
-BUDGET_USAGE_FIXTURE="$FIXFILE" node "$REPO/bin/probe.mjs" claude probe
+# CACHE_TTL=0: each poll must re-read the (flipping) fixture, otherwise the
+# 45s usage cache masks the 95→20 flip and the wait never sees the refresh.
+BUDGET_CACHE_TTL=0 BUDGET_STATE_DIR="$state/probe-cache" BUDGET_USAGE_FIXTURE="$FIXFILE" node "$REPO/bin/probe.mjs" claude probe
 WRAP
 chmod +x "$probe"
 
