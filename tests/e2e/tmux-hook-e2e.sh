@@ -51,11 +51,14 @@ run_phase hard "$HARD_FIX" "$MARK_HARD"
 if grep -q "__E2E_DONE_" "$LAST_OUT" 2>/dev/null; then
   if [ -e "$MARK_HARD" ]; then
     bad "hard: marker file WAS created — hook did NOT deny the Bash tool"
+  elif grep -qiE "硬线|92%|只写|deny|permission" "$LAST_OUT" 2>/dev/null; then
+    # REQUIRE positive evidence the deny actually fired — not just "marker
+    # absent" (which could also mean the agent never attempted the tool). The
+    # deny reason text must appear, proving the PreToolUse hook ran and blocked.
+    ok "hard: Bash denied by guard (marker absent AND deny reason surfaced)"
   else
-    ok "hard: marker file NOT created — Bash denied by guard at hard line"
+    bad "hard: marker absent but NO deny evidence — inconclusive (agent may not have attempted the tool)"; sed -n '1,40p' "$LAST_OUT"
   fi
-  # bonus: confirm the deny reason actually surfaced in the run
-  grep -qiE "硬线|92%|只写|deny" "$LAST_OUT" && note "    (deny reason surfaced in transcript ✓)"
 else
   bad "hard: claude did not finish within timeout"; sed -n '1,30p' "$LAST_OUT"
 fi
