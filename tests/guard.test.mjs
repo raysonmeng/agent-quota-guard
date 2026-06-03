@@ -16,7 +16,7 @@ import test from 'node:test';
 
 import { shouldFire } from '../lib/guard/fingerprint.mjs';
 import { isCheckpointWrite } from '../lib/guard/checkpoint.mjs';
-import { phasePost, phaseStop } from '../lib/guard/hook.mjs';
+import { phasePost, phasePre, phaseStop } from '../lib/guard/hook.mjs';
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -492,7 +492,7 @@ test('phasePost: util=92 → T3 message fires once (fingerprint)', async () => {
     assert.notEqual(r1, null, 'T3 fires on first crossing');
     const msg = JSON.stringify(r1);
     // T3 message mentions hard line
-    assert.ok(msg.includes('92') || msg.includes('硬线'), `T3 message should mention hard: ${msg}`);
+    assert.match(msg, /硬线 92%/, `T3 message should mention hard threshold percent: ${msg}`);
 
     // Second call same fp → fingerprint prevents double-fire
     const r2 = await withEnvAsync(env, () => phasePost('claude', {}, TH));
@@ -522,6 +522,31 @@ test('phasePost: fail-open — fetchUsage returns ok:false → null output', asy
     );
     // fetchUsage returns ok:false when schema_no_buckets → phasePost returns null (fail-open)
     assert.equal(result, null, 'fail-open: bad probe → null output, no throw');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: hard deny reason names the driving Codex usage window', async () => {
+  const dir = tempDir();
+  try {
+    const codexFx = join(dir, 'codex-primary-hard.json');
+    writeFileSync(codexFx, JSON.stringify({
+      rate_limit: {
+        primary_window: { used_percent: 100, reset_at: NOW + 3600, limit_window_seconds: 18000, reset_after_seconds: 3600 },
+        secondary_window: { used_percent: 71, reset_at: NOW + 604800, limit_window_seconds: 604800, reset_after_seconds: 604800 },
+      },
+      additional_rate_limits: [],
+    }));
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: codexFx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePre('codex', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH),
+    );
+
+    const reason = result?.hookSpecificOutput?.permissionDecisionReason || '';
+    assert.match(reason, /额度 100%≥92% 硬线/);
+    assert.match(reason, /触发窗口:rate_limit\.primary_window/);
+    assert.match(reason, /rate_limit\.secondary_window=71%/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

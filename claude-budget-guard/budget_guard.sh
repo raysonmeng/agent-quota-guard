@@ -72,17 +72,72 @@ mkdir -p "$STATE_DIR" 2>/dev/null || true
 command -v jq >/dev/null 2>&1 || exit 0    # 没 jq 就静默放行
 INPUT="$(cat 2>/dev/null || true)"
 
+# ───────── 项目作用域 + 手动跳过硬线(override)─────────
+# 硬线默认仍拦;用户显式授权时(明确短语,绝不复用普通「继续」)记一个限时、
+# 按项目作用域的 marker,pre/stop 在硬线时若 marker 有效则放行,到期自动恢复。
+# Node 对应:lib/guard/hook.mjs 的 writeSkip / skipRemaining / OVERRIDE_RE。
+scope_hash() {
+  pwd -P 2>/dev/null | cksum | awk '{print $1}'
+}
+skip_ttl() {
+  local t="${BUDGET_SKIP_TTL:-1800}"
+  [[ "$t" =~ ^[0-9]+$ ]] || t=1800
+  printf '%s' "$t"
+}
+skip_marker() {
+  printf '%s/skip/%s_%s.json' "$STATE_DIR" "$AGENT" "$(scope_hash)"
+}
+write_skip() {
+  local dir="$STATE_DIR/skip" m exp tmp
+  mkdir -p "$dir" 2>/dev/null || true
+  m="$(skip_marker)"
+  exp=$(( $(date +%s) + $(skip_ttl) ))
+  tmp="${m}.tmp.$$"
+  # atomic write (tmp + rename), mirrors Node writeSkip / writePending so a
+  # concurrent reader never sees a torn marker.
+  printf '{"expires":%s}' "$exp" > "$tmp" 2>/dev/null && mv -f "$tmp" "$m" 2>/dev/null || true
+}
+# 回显剩余秒数(skip 有效)否则 0;过期则清理 marker。
+skip_remaining() {
+  local m exp now rem
+  m="$(skip_marker)"
+  [[ -f "$m" ]] || { echo 0; return; }
+  exp=$(jq -r '.expires // 0' "$m" 2>/dev/null || echo 0)
+  [[ "$exp" =~ ^[0-9]+$ ]] || exp=0
+  now=$(date +%s)
+  rem=$(( exp - now ))
+  if (( rem > 0 )); then echo "$rem"; else rm -f "$m" 2>/dev/null || true; echo 0; fi
+}
+
+# 显式跳过授权在「查不到用量就退出」之前处理(只记录授权,不需要用量)。
+if [[ "$PHASE" == "prompt" ]]; then
+  _ovr_text=$(printf '%s' "$INPUT" | jq -r '.prompt // .user_prompt // .tool_input.prompt // empty' 2>/dev/null || true)
+  if printf '%s' "$_ovr_text" | grep -Eiq '/budget-skip|force-continue|跳过硬线|强制继续'; then
+    write_skip
+    _ovr_mins=$(( ($(skip_ttl) + 59) / 60 ))
+    _ovr_msg="[额度] 已记录硬线手动跳过授权:接下来约 ${_ovr_mins} 分钟内,即使到硬线也不强停(触发窗口仍会提示),到期自动恢复拦截。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$_ovr_msg" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
+    else
+      jq -n --arg m "$_ovr_msg" '{systemMessage:$m}'
+    fi
+    exit 0
+  fi
+fi
+
 # ───────── 取用量:回显 "util reset_epoch"(带缓存)─────────
 fetch_usage() {
-  local cache="$STATE_DIR/usage_${AGENT}.json" now ts token creds resp util reset probed
+  local cache="$STATE_DIR/usage_${AGENT}.json" now ts token creds resp util reset probed bucket buckets
   now=$(date +%s)
   if [[ -x "$BUDGET_PROBE" ]]; then
     probed=$("$BUDGET_PROBE" --agent "$AGENT" 2>/dev/null || true)
     util=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | .util // empty' 2>/dev/null || true)
     reset=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | .reset_epoch // 0' 2>/dev/null || true)
+    bucket=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | (.bucket_id // empty | tostring | gsub("[[:space:]]+";"_"))' 2>/dev/null || true)
+    buckets=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | [.buckets[]? | select(.util != null) | "\((.id // "unknown") | tostring | gsub("[[:space:]]+";"_"))=\((.util // 0) | floor)%"] | join(",")' 2>/dev/null || true)
     if [[ -n "$util" && "$util" =~ ^[0-9]+$ ]]; then
       [[ "$reset" =~ ^[0-9]+$ ]] || reset=0
-      printf '%s %s' "$util" "$reset"
+      printf '%s %s %s %s' "$util" "$reset" "${bucket:-"-"}" "${buckets:-"-"}"
       return
     fi
   fi
@@ -174,8 +229,16 @@ fmt_dur() { # 秒 -> "约 N 分钟" / "约 N 小时"
   if (( s<5400 )); then echo "约 $(( (s+59)/60 )) 分钟"; else echo "约 $(awk -v s="$s" 'BEGIN{printf "%.1f", s/3600}') 小时"; fi
 }
 
-scope_hash() {
-  pwd -P 2>/dev/null | cksum | awk '{print $1}'
+usage_detail() {
+  local bucket="${1:-}" buckets="${2:-}" detail=""
+  [[ "$bucket" == "-" || "$bucket" == "null" ]] && bucket=""
+  [[ "$buckets" == "-" || "$buckets" == "null" ]] && buckets=""
+  [[ -n "$bucket" ]] && detail="触发窗口:${bucket}"
+  if [[ -n "$buckets" ]]; then
+    [[ -n "$detail" ]] && detail="${detail}; "
+    detail="${detail}窗口:${buckets}"
+  fi
+  [[ -n "$detail" ]] && printf '（%s）' "$detail"
 }
 
 warn_once_should_fire() {
@@ -219,7 +282,7 @@ pause_codex_goal_if_possible() {
 }
 
 # 取用量
-read -r UTIL RESET <<<"$(fetch_usage)"
+read -r UTIL RESET BUCKET_ID BUCKETS_SUMMARY <<<"$(fetch_usage)"
 [[ -z "${UTIL:-}" || ! "$UTIL" =~ ^[0-9]+$ ]] && exit 0   # 查不到 -> 静默放行
 
 # ───────── prompt:长任务启动预估(唯一「额度充足也提示」的情形)─────────
@@ -257,7 +320,8 @@ if [[ "$PHASE" == "pre" ]]; then
   if (( UTIL >= HARD )); then
     pause_codex_goal_if_possible
     if is_checkpoint_write; then exit 0; fi
-    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)。停止新工作:1) 把进度写入 ${CHECKPOINT}(写文件不拦);2) 用文字告诉我续接点;3) 不要再跑命令或换工具绕。刷新后(约 $(fmt_clock "$RESET"))发「继续」即可接上。"
+    if [[ "$(skip_remaining)" != "0" ]]; then exit 0; fi   # 手动跳过有效 → 静默放行
+    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。停止新工作:1) 把进度写入 ${CHECKPOINT}(写文件不拦);2) 用文字告诉我续接点;3) 不要再跑命令或换工具绕。刷新后(约 $(fmt_clock "$RESET"))发「继续」即可接上。"
     jq -n --arg x "$r" '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny", permissionDecisionReason:$x}}'
   fi
   exit 0
@@ -289,6 +353,14 @@ fi
 if [[ "$PHASE" == "stop" ]]; then
   record_point "$UTIL"
   if (( UTIL >= HARD )); then
+    _stop_rem="$(skip_remaining)"
+    if [[ "$_stop_rem" != "0" ]]; then
+      # 手动跳过有效:不强停、不写 pending,让循环继续(到期自动恢复)。
+      _stop_mins=$(( (_stop_rem + 59) / 60 ))
+      _stop_note="额度 ${UTIL}%≥${HARD}% 硬线$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY"),但已手动跳过(约 ${_stop_mins} 分钟后恢复拦截)。继续推进,注意在刷新前完成收尾。"
+      [[ "$AGENT" == "codex" ]] && jq -n --arg m "$_stop_note" '{systemMessage:$m}'
+      exit 0
+    fi
     pause_codex_goal_if_possible
     # 写待续状态(watchdog 用)
     sid=$(printf '%s' "$INPUT" | jq -r '.session_id // .thread_id // empty' 2>/dev/null || true)
@@ -298,7 +370,7 @@ if [[ "$PHASE" == "stop" ]]; then
     jq -n --arg sid "$sid" --arg cwd "$(pwd)" --arg reset "$RESET" --arg util "$UTIL" \
       '{status:"paused", agent:env.AGENT, session_id:$sid, cwd:$cwd, reset:($reset|tonumber? // 0), util:($util|tonumber), at:(now|floor)}' \
       > "$pending_dir/${AGENT}_${key}.json" 2>/dev/null || true
-    stop="额度达硬线(${UTIL}%),已在本轮末尾干净停下并保存续接点。额度刷新约 $(fmt_clock "$RESET");之后发「继续」或由 watchdog 自动续跑。"
+    stop="额度达硬线(${UTIL}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY"),已在本轮末尾干净停下并保存续接点。额度刷新约 $(fmt_clock "$RESET");之后发「继续」或由 watchdog 自动续跑。"
     jq -n --arg s "$stop" '{continue:false, stopReason:$s}'
   elif (( UTIL >= WARN_REPEAT )); then
     secs=$(seconds_to_hard "$UTIL")

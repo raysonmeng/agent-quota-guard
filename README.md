@@ -86,6 +86,14 @@ After install, **you don't run anything** — the guard rides along with your no
    - you simply send "continue" in a new session — the guard injects the checkpoint context so you don't lose your place; or
    - **Unattended:** arm the [watchdog](#auto-resume-watchdog) to resume the task automatically after the quota refreshes.
 
+### Need just a little more? (manual hard-line skip)
+
+Sometimes you're a few steps from done and would rather push through than stop and resume. You can **explicitly** authorize the guard to stop enforcing the hard line for a while. In your prompt, include one of these phrases:
+
+- `/budget-skip` · `force-continue` · `跳过硬线` · `强制继续`
+
+This records a **time-boxed** (default 30 min, `BUDGET_SKIP_TTL`), **per-project** grant: while it's valid the hard line won't deny tools or force a round-end stop. It auto-expires and the guard then re-enforces normally. A plain "continue" never triggers it — the phrase must be explicit. This only delays a *clean* stop; it **cannot** create quota — once the API refuses requests, nothing keeps the agent running.
+
 ---
 
 ## Configuration
@@ -97,6 +105,7 @@ All settings are environment variables with sane defaults — you usually don't 
 | `BUDGET_WARN_ONCE` | `80` | T1 — warn once per quota window |
 | `BUDGET_WARN_REPEAT` | `90` | T2 — wrap-up nudge every turn |
 | `BUDGET_HARD` | `92` | T3 — hard stop / park at the round boundary |
+| `BUDGET_SKIP_TTL` | `1800` | seconds a [manual hard-line skip](#need-just-a-little-more-manual-hard-line-skip) stays active |
 | `BUDGET_CACHE_TTL` | `45` | seconds to cache the usage lookup |
 | `BUDGET_CHECKPOINT` | `.agent/checkpoint.md` | checkpoint path (relative to project root) |
 | `BUDGET_STATE_DIR` | `~/.budget-guard` | cache / history / pending-resume state |
@@ -120,7 +129,7 @@ BUDGET_HARD=90
 
 **Precedence (high → low):** environment variable **>** project config **>** global config **>** built-in default. Both files are optional; with neither present, behavior is exactly the built-in defaults.
 
-For safety, config files only accept known safe tuning keys: `BUDGET_WARN_ONCE`, `BUDGET_WARN_REPEAT`, `BUDGET_SOFT`, `BUDGET_HARD`, `BUDGET_CACHE_TTL`, `BUDGET_HIST_WINDOW`, and `BUDGET_CLAUDE_UA`. Command, credential, endpoint, debug-fixture, dispatch, path, and automation keys such as `BUDGET_PROBE`, token variables, `BUDGET_CODEX_URL`, `BUDGET_USAGE_FIXTURE`, `BUDGET_AGENT`, `BUDGET_PHASE`, `BUDGET_STATE_DIR`, `BUDGET_CHECKPOINT`, `BUDGET_WATCHDOG_ARM`, `BUDGET_RESUME_BELOW`, and `BUDGET_RESUME_PROMPT` must be set as explicit process environment variables.
+For safety, config files only accept known safe tuning keys: `BUDGET_WARN_ONCE`, `BUDGET_WARN_REPEAT`, `BUDGET_SOFT`, `BUDGET_HARD`, `BUDGET_CACHE_TTL`, `BUDGET_HIST_WINDOW`, and `BUDGET_CLAUDE_UA`. Command, credential, endpoint, debug-fixture, dispatch, path, and automation keys such as `BUDGET_PROBE`, token variables, `BUDGET_CODEX_URL`, `BUDGET_USAGE_FIXTURE`, `BUDGET_AGENT`, `BUDGET_PHASE`, `BUDGET_STATE_DIR`, `BUDGET_CHECKPOINT`, `BUDGET_WATCHDOG_ARM`, `BUDGET_RESUME_BELOW`, `BUDGET_RESUME_PROMPT`, and `BUDGET_SKIP_TTL` (it governs how long the hard line can be skipped) must be set as explicit process environment variables.
 
 ---
 
@@ -287,6 +296,14 @@ cd codex-budget-guard  && ./install.sh    # Codex
    - 你在新会话里发一句「继续」 —— 守卫注入 checkpoint 上下文,不丢进度;或
    - **无人值守:** 武装 [watchdog](#自动续跑-watchdog),额度刷新后自动接着跑。
 
+### 就差一点点?(手动跳过硬线)
+
+有时你离收尾只差几步,与其停下来再续接,不如一口气干完。你可以**显式**授权守卫暂时不再强制硬线 —— 在 prompt 里带上下面任一短语即可:
+
+- `/budget-skip` · `force-continue` · `跳过硬线` · `强制继续`
+
+这会记录一个**限时**(默认 30 分钟,由 `BUDGET_SKIP_TTL` 控制)、**按项目作用域**的授权:有效期内硬线不再拦工具、也不在轮末强停;到期自动恢复正常拦截。普通的「继续」**不会**触发 —— 短语必须显式。它只是延后一次*干净*的停止,**并不能**凭空变出额度 —— API 一旦拒绝请求,谁也没法让 agent 继续跑。
+
 ---
 
 ## 配置项
@@ -298,6 +315,7 @@ cd codex-budget-guard  && ./install.sh    # Codex
 | `BUDGET_WARN_ONCE` | `80` | T1 —— 本额度窗口提醒一次 |
 | `BUDGET_WARN_REPEAT` | `90` | T2 —— 每轮提示收尾 |
 | `BUDGET_HARD` | `92` | T3 —— 轮末强制停 / park |
+| `BUDGET_SKIP_TTL` | `1800` | [手动跳过硬线](#就差一点点手动跳过硬线)的有效秒数 |
 | `BUDGET_CACHE_TTL` | `45` | 用量查询缓存秒数 |
 | `BUDGET_CHECKPOINT` | `.agent/checkpoint.md` | checkpoint 路径(相对项目根) |
 | `BUDGET_STATE_DIR` | `~/.budget-guard` | 缓存 / 历史 / 待续状态目录 |
@@ -321,7 +339,7 @@ BUDGET_HARD=90
 
 **优先级(高 → 低):** 环境变量 **>** 项目配置 **>** 全局配置 **>** 内置默认。两份文件都可选;都不存在时行为与内置默认完全一致。
 
-出于安全考虑,配置文件只接受明确安全的调参 key:`BUDGET_WARN_ONCE`、`BUDGET_WARN_REPEAT`、`BUDGET_SOFT`、`BUDGET_HARD`、`BUDGET_CACHE_TTL`、`BUDGET_HIST_WINDOW`、`BUDGET_CLAUDE_UA`。命令、凭据、端点、调试 fixture、调度身份、路径和自动化控制类 key,例如 `BUDGET_PROBE`、token 变量、`BUDGET_CODEX_URL`、`BUDGET_USAGE_FIXTURE`、`BUDGET_AGENT`、`BUDGET_PHASE`、`BUDGET_STATE_DIR`、`BUDGET_CHECKPOINT`、`BUDGET_WATCHDOG_ARM`、`BUDGET_RESUME_BELOW`、`BUDGET_RESUME_PROMPT`,仍需显式设置为进程环境变量。
+出于安全考虑,配置文件只接受明确安全的调参 key:`BUDGET_WARN_ONCE`、`BUDGET_WARN_REPEAT`、`BUDGET_SOFT`、`BUDGET_HARD`、`BUDGET_CACHE_TTL`、`BUDGET_HIST_WINDOW`、`BUDGET_CLAUDE_UA`。命令、凭据、端点、调试 fixture、调度身份、路径和自动化控制类 key,例如 `BUDGET_PROBE`、token 变量、`BUDGET_CODEX_URL`、`BUDGET_USAGE_FIXTURE`、`BUDGET_AGENT`、`BUDGET_PHASE`、`BUDGET_STATE_DIR`、`BUDGET_CHECKPOINT`、`BUDGET_WATCHDOG_ARM`、`BUDGET_RESUME_BELOW`、`BUDGET_RESUME_PROMPT`,以及 `BUDGET_SKIP_TTL`(它决定硬线能被跳过多久),仍需显式设置为进程环境变量。
 
 ---
 

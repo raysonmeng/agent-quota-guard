@@ -325,6 +325,46 @@ test("Bash guard falls back to default thresholds when config hard is out of ran
   await rm(root, { recursive: true, force: true });
 });
 
+test("Bash guard hard-line message names the driving Codex usage window", async () => {
+  const { root, state, deep } = await scratch();
+  const fakeProbe = join(root, "fake-probe");
+  await writeFile(fakeProbe, [
+    "#!/usr/bin/env bash",
+    "cat <<'JSON'",
+    JSON.stringify({
+      ok: true,
+      agent: "codex",
+      util: 100,
+      hard_util: 100,
+      warn_util: 100,
+      bucket_id: "additional_rate_limits[GPT 5 Codex].secondary_window",
+      reset_epoch: 1780488339,
+      buckets: [
+        { id: "rate_limit.primary_window", util: 77, reset_epoch: 1780488339, resettable: true },
+        { id: "additional_rate_limits[GPT 5 Codex].secondary_window", util: 100, reset_epoch: 1780856526, resettable: true }
+      ]
+    }),
+    "JSON"
+  ].join("\n") + "\n", { mode: 0o755 });
+
+  const result = await runCommand("bash", [join(rootDir, "codex-budget-guard", "budget_guard.sh"), "codex", "pre"], {
+    cwd: deep,
+    env: {
+      ...process.env,
+      HOME: root,
+      BUDGET_STATE_DIR: state,
+      BUDGET_PROBE: fakeProbe
+    },
+    timeout: 10_000
+  });
+
+  assert.equal(result.code, 0, `budget_guard should deny without crashing, stderr=${result.stderr}`);
+  assert.match(result.stdout, /额度已达硬线\(100% ≥ 92%\)/);
+  assert.match(result.stdout, /触发窗口:additional_rate_limits\[GPT_5_Codex\]\.secondary_window/);
+  assert.match(result.stdout, /rate_limit\.primary_window=77%/);
+  await rm(root, { recursive: true, force: true });
+});
+
 test("Bash probe falls back when config cache TTL is invalid", async () => {
   const { root, state, proj, deep } = await scratch();
   await writeFile(join(state, "probe_codex.json"), JSON.stringify({
