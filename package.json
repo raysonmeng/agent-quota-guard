@@ -37,12 +37,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/raysonmeng/token-budget-guard.git"
+    "url": "git+https://github.com/raysonmeng/agent-quota-guard.git"
   },
   "bugs": {
-    "url": "https://github.com/raysonmeng/token-budget-guard/issues"
+    "url": "https://github.com/raysonmeng/agent-quota-guard/issues"
   },
-  "homepage": "https://github.com/raysonmeng/token-budget-guard#readme",
+  "homepage": "https://github.com/raysonmeng/agent-quota-guard#readme",
   "keywords": [
     "claude-code",
     "codex",
