@@ -1,6 +1,10 @@
 {
-  "name": "token-budget-guard",
+  "name": "@raysonmeng/token-budget-guard",
   "version": "0.2.0",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "description": "Claude Code / Codex 额度守卫:跑长任务时实时感知订阅额度,接近上限在轮末干净暂停 + 写 checkpoint,刷新后续接。",
   "type": "module",
   "bin": {
