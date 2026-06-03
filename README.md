@@ -109,9 +109,9 @@ token-budget-guard/
 
 ### 方式 a:npx(推荐,无需 clone)
 ```bash
-npx @raysonmeng/token-budget-guard claude     # 装到 Claude Code(~/.claude)
-npx @raysonmeng/token-budget-guard codex      # 装到 Codex(~/.codex)
-npx @raysonmeng/token-budget-guard claude --uninstall   # 卸载
+npx agent-quota-guard claude     # 装到 Claude Code(~/.claude)
+npx agent-quota-guard codex      # 装到 Codex(~/.codex)
+npx agent-quota-guard claude --uninstall   # 卸载
 ```
 零运行时依赖的薄 CLI:`claude` 走 Node 安装器,`codex` 走随包携带的 bash 安装器;两者逻辑与方式 b 完全一致。前置仍需 `jq`(运行期)、`python3`(Codex 安装期)、`node>=18`;Codex 的 MCP server 装时自动 `npm install` 拉 SDK。
 

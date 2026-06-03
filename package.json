@@ -1,5 +1,5 @@
 {
-  "name": "@raysonmeng/token-budget-guard",
+  "name": "agent-quota-guard",
   "version": "0.2.0",
   "publishConfig": {
     "access": "public",

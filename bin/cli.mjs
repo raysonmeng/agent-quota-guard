@@ -36,9 +36,9 @@ claude 专属选项:
          node>=18;Codex 的 MCP server 装时会自动 npm install SDK。
 
 示例:
-  npx @raysonmeng/token-budget-guard claude
-  npx @raysonmeng/token-budget-guard codex
-  npx @raysonmeng/token-budget-guard claude --uninstall
+  npx agent-quota-guard claude
+  npx agent-quota-guard codex
+  npx agent-quota-guard claude --uninstall
 `;
 
 function out(s) { process.stdout.write(s.endsWith('\n') ? s : s + '\n'); }
