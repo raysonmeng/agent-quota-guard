@@ -10,3 +10,10 @@
 
 # Node 依赖(MCP server 的 @modelcontextprotocol/sdk 等)
 node_modules/
+
+# Claude Code 运行期锁(含本机 PID/sessionId,不可移植)
+.claude/scheduled_tasks.lock
+
+# AgentBridge 运行期产物(日志/socket;config.json 保留)
+.agentbridge/*.log
+.agentbridge/*.sock

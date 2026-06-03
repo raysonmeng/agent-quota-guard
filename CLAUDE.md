@@ -98,3 +98,36 @@ diff claude-budget-guard/watchdog.sh    codex-budget-guard/watchdog.sh
 ## 文档关系
 
 `CLAUDE.md`(本文件)是本仓库**唯一权威**的 agent 上手文档。同目录的 `AGENTS.md` 已收成一句指向本文件的指针(原英文内容已并入此处),不再单独维护——所有更新只改本文件。
+
+<!-- AgentBridge:start -->
+## AgentBridge — Multi-Agent Collaboration
+
+You are working in a **multi-agent environment** powered by AgentBridge.
+Another AI agent (Codex, by OpenAI) is available in a parallel session on this machine.
+
+### Communication mechanism
+- **Claude → Codex**: Use the AgentBridge MCP tools (`reply` / `get_messages`) — these are yours only.
+- **Codex → Claude**: Codex has no symmetric tool. The bridge transparently intercepts Codex's normal output and forwards it to you. Messages arrive as push notifications (or via `get_messages` in pull mode).
+- If Codex ever complains it can't find a "send-to-Claude" API, remind it that its side is transparent — it just writes a reply and you'll see it.
+
+### When to collaborate vs. work solo
+- **Collaborate** when the task benefits from a second perspective, parallel execution, or capabilities you lack (e.g., sandboxed code execution, independent verification).
+- **Work solo** for simple, self-contained tasks where the coordination overhead isn't worth it.
+- When in doubt, **propose a task split** to Codex rather than doing everything yourself.
+
+### Capability comparison
+| Capability | Claude (you) | Codex |
+|---|---|---|
+| Architecture & planning | Strong | Moderate |
+| Code review & analysis | Strong | Strong |
+| Sandboxed code execution | No | Yes |
+| File editing & refactoring | Yes (via tools) | Yes (via sandbox) |
+| Web search & docs | Yes | Limited |
+| Independent verification | Cross-review | Reproduce & test |
+
+### How to start collaborating
+1. When you receive a complex task, **proactively propose a division of labor** to Codex via the reply tool.
+2. State what you'll handle and what you'd like Codex to take on.
+3. Ask for Codex's agreement or counter-proposal before proceeding.
+4. After task completion, **cross-review** each other's work.
+<!-- AgentBridge:end -->

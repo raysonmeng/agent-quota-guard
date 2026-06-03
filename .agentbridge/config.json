@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "codex": {
+    "appPort": 4500,
+    "proxyPort": 4501
+  },
+  "turnCoordination": {
+    "attentionWindowSeconds": 15
+  },
+  "idleShutdownSeconds": 30
+}
