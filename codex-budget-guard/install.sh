@@ -474,10 +474,12 @@ try:
     raw=open(p,encoding="utf-8",newline="").read()
 except OSError:
     sys.exit(0)
+created_marker = p + ".budget-guard-created"
 had_preexisting_backup = any(
     name.startswith(os.path.basename(p) + ".bak.")
     for name in os.listdir(os.path.dirname(p) or ".")
 )
+created_by_installer = os.path.exists(created_marker) or not had_preexisting_backup
 use_crlf = raw.count("\r\n") > raw.count("\n") - raw.count("\r\n")
 text = raw.replace("\r\n", "\n")
 new=strip_budget_hooks(text)
@@ -485,11 +487,16 @@ new=strip_mcp_budget_table(new)
 out=restore_line_endings(new, use_crlf)
 if out != raw:
     shutil.copy2(p,p+f".bak.{int(time.time() * 1000)}")
-    if not new.strip() and not had_preexisting_backup:
+    if not new.strip() and created_by_installer:
         os.remove(p)
     else:
         open(p,"w",encoding="utf-8",newline="").write(out)
     print("✓ 已从 config.toml 移除 budget-guard hooks/MCP server")
+if os.path.exists(created_marker):
+    try:
+        os.remove(created_marker)
+    except OSError:
+        pass
 PY
   if [[ -f "$MEMORY" ]]; then
     python3 - "$MEMORY" "$MARK_START" "$MARK_END" <<'PY'
@@ -1053,11 +1060,16 @@ if timeout_value < 18000:
 text = ""
 raw = ""
 use_crlf = False
-if os.path.exists(path):
+created_marker = path + ".budget-guard-created"
+path_existed = os.path.exists(path)
+keep_created_marker = not path_existed
+if path_existed:
     shutil.copy2(path, path + f".bak.{int(time.time() * 1000)}")
     raw = open(path, encoding="utf-8", newline="").read()
     use_crlf = raw.count("\r\n") > raw.count("\n") - raw.count("\r\n")
     text = raw.replace("\r\n", "\n")
+    existing_unmanaged = strip_mcp_budget_table(strip_budget_hooks(text))
+    keep_created_marker = os.path.exists(created_marker) and raw.strip() and not existing_unmanaged.strip()
 
 text = strip_budget_hooks(text)
 hook_plan = [
@@ -1089,6 +1101,16 @@ tool_timeout_sec = {timeout_value:.1f}
 text = append_block(text, mcp_block)
 out = restore_line_endings(text, use_crlf)
 open(path, "w", encoding="utf-8", newline="").write(out)
+if keep_created_marker:
+    try:
+        open(created_marker, "w", encoding="utf-8").write("created by budget-guard\n")
+    except OSError:
+        pass
+elif os.path.exists(created_marker):
+    try:
+        os.remove(created_marker)
+    except OSError:
+        pass
 print(f"✓ hooks/MCP config → {path} (tool_timeout_sec={timeout_value:.0f})")
 PY
 

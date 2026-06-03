@@ -1009,6 +1009,59 @@ test("codex installer removes config.toml on uninstall when install created it",
   await assert.rejects(() => access(configPath));
 });
 
+test("codex installer removes self-created config.toml after repeated install uninstall cycles", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "budget-install-created-config-repeat-home-"));
+  const fakeBin = resolve(home, "fake-bin");
+  await mkdir(fakeBin, { recursive: true });
+  await writeFile(resolve(fakeBin, "npm"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+
+  const configPath = resolve(home, ".codex", "config.toml");
+  const markerPath = `${configPath}.budget-guard-created`;
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    BUDGET_MCP_TOOL_TIMEOUT_SEC: "18000"
+  };
+
+  for (let i = 0; i < 2; i++) {
+    await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
+    await access(configPath);
+    await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
+    await assert.rejects(() => access(configPath));
+    await assert.rejects(() => access(markerPath));
+  }
+});
+
+test("codex installer preserves user config created after uninstalling a self-created config", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "budget-install-created-then-user-config-home-"));
+  const fakeBin = resolve(home, "fake-bin");
+  await mkdir(fakeBin, { recursive: true });
+  await writeFile(resolve(fakeBin, "npm"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+
+  const codexDir = resolve(home, ".codex");
+  const configPath = resolve(codexDir, "config.toml");
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    BUDGET_MCP_TOOL_TIMEOUT_SEC: "18000"
+  };
+
+  await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
+  await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
+  await assert.rejects(() => access(configPath));
+
+  const userConfig = '[mcp_servers.user]\ncommand = "node"\nargs = ["server.mjs"]\n';
+  await mkdir(codexDir, { recursive: true });
+  await writeFile(configPath, userConfig);
+
+  await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
+  await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
+  assert.equal(await readFile(configPath, "utf8"), userConfig);
+  await assert.rejects(() => access(`${configPath}.budget-guard-created`));
+});
+
 test("codex installer preserves marker examples and replaces AGENTS.md block in place", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "budget-install-agents-marker-home-"));
   const fakeBin = resolve(home, "fake-bin");
