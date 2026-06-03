@@ -105,7 +105,19 @@ token-budget-guard/
 
 ## 5. 安装
 
-### Claude Code
+两种方式,任选其一:**(a) npx 一行装(不用 clone)** 或 **(b) clone 仓库跑 `./install.sh`**。
+
+### 方式 a:npx(推荐,无需 clone)
+```bash
+npx token-budget-guard claude     # 装到 Claude Code(~/.claude)
+npx token-budget-guard codex      # 装到 Codex(~/.codex)
+npx token-budget-guard claude --uninstall   # 卸载
+```
+零运行时依赖的薄 CLI:`claude` 走 Node 安装器,`codex` 走随包携带的 bash 安装器;两者逻辑与方式 b 完全一致。前置仍需 `jq`(运行期)、`python3`(Codex 安装期)、`node>=18`;Codex 的 MCP server 装时自动 `npm install` 拉 SDK。
+
+### 方式 b:clone 仓库
+
+#### Claude Code
 ```bash
 cd claude-budget-guard
 ./install.sh
@@ -115,7 +127,7 @@ cd claude-budget-guard
 - 重开会话后 `/hooks` 应能看到 `budget_guard`。
 - 卸载:`./install.sh --uninstall`
 
-### Codex
+#### Codex
 ```bash
 cd codex-budget-guard
 ./install.sh

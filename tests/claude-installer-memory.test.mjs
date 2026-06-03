@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -235,4 +235,23 @@ test("claude bash fallback can uninstall managed hooks when node is unavailable"
 
   const uninstalled = JSON.parse(await readFile(settingsPath, "utf8"));
   assert.deepEqual(uninstalled.hooks.PreToolUse[0].hooks.map((hook) => hook.command), ["echo user-keep"]);
+});
+
+test("claude installer deploys only runtime bin files, not the installer CLIs", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "budget-claude-binwhitelist-home-"));
+  const claudeDir = resolve(home, ".claude");
+  await mkdir(claudeDir, { recursive: true });
+
+  const result = install({ home, srcRoot: root, skipDoctor: true });
+  const deployed = (await readdir(result.binDir)).sort();
+
+  // runtime executables MUST be deployed
+  assert.ok(deployed.includes("probe.mjs"), "probe.mjs should be deployed");
+  assert.ok(deployed.includes("guard.mjs"), "guard.mjs should be deployed");
+  // installer-only CLIs MUST NOT pollute the user's runtime bin dir
+  assert.ok(!deployed.includes("cli.mjs"), "cli.mjs (npx launcher) must not be deployed");
+  assert.ok(
+    !deployed.includes("install-claude.mjs"),
+    "install-claude.mjs (installer shim) must not be deployed"
+  );
 });
