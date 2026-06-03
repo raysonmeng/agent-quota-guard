@@ -586,7 +586,9 @@ mkdir -p "$BIN"
 cp "$HERE/budget_guard.sh" "$BIN/"
 cp "$HERE/watchdog.sh" "$BIN/"
 cp "$HERE/budget-probe" "$BIN/"
+[[ -f "$HERE/budget-config.sh" ]] && cp "$HERE/budget-config.sh" "$BIN/"
 chmod +x "$BIN/budget_guard.sh" "$BIN/watchdog.sh" "$BIN/budget-probe"
+[[ -f "$BIN/budget-config.sh" ]] && chmod +x "$BIN/budget-config.sh"
 echo "✓ 脚本 → $BIN"
 
 # 1b) 部署 MCP server(官方 SDK,stdio)

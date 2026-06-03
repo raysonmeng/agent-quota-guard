@@ -6,7 +6,8 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
@@ -199,6 +200,18 @@ test('checkThresholds: non-integer value → invalid, falls back to defaults', (
   const r = checkThresholds({ BUDGET_WARN_ONCE: 'abc', BUDGET_WARN_REPEAT: '90', BUDGET_HARD: '92' });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some(e => e.includes('warnOnce') && e.includes('abc')));
+});
+
+test('checkThresholds: numeric prefixes are invalid, not partially parsed', () => {
+  const inline = checkThresholds({ BUDGET_WARN_ONCE: '80', BUDGET_WARN_REPEAT: '90', BUDGET_HARD: '95 # inline' });
+  assert.equal(inline.ok, false);
+  assert.equal(inline.hard, 92);
+  assert.ok(inline.errors.some(e => e.includes('hard') && e.includes('95 # inline')));
+
+  const suffix = checkThresholds({ BUDGET_WARN_ONCE: '80', BUDGET_WARN_REPEAT: '90', BUDGET_HARD: '95x' });
+  assert.equal(suffix.ok, false);
+  assert.equal(suffix.hard, 92);
+  assert.ok(suffix.errors.some(e => e.includes('hard') && e.includes('95x')));
 });
 
 test('checkThresholds: empty string values → treated as default', () => {
@@ -399,6 +412,59 @@ test('fetchUsage: fixture path → parsed result, no network', async () => {
     // claude-usage.json: seven_day_sonnet=94 is the highest resettable
     assert.equal(result.util, 94);
     assert.equal(result.bucket_id, 'seven_day_sonnet');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fetchUsage: cache TTL numeric prefixes are invalid, not partially parsed', async () => {
+  const dir = tempDir();
+  const raw = JSON.parse(readFileSync(join(ROOT, 'tests', 'fixtures', 'codex-wham-low.json'), 'utf8'));
+  try {
+    await withEnv(
+      {
+        HOME: dir,
+        BUDGET_STATE_DIR: dir,
+        BUDGET_CACHE_TTL: '999999 # inline',
+        BUDGET_CODEX_AUTH_JSON: join(dir, 'missing-auth.json'),
+        BUDGET_CODEX_TOKEN: undefined,
+        BUDGET_CODEX_ACCOUNT_ID: undefined,
+      },
+      async () => {
+        assert.equal(writeCache('codex', { fetched_at: NOW - 1000, raw, cap_util: 18 }), true);
+        const result = await fetchUsage('codex', { now: NOW });
+        assert.equal(result.source, 'cache', 'network failure may serve stale cache');
+        assert.equal(result.stale, true, 'invalid TTL must fall back to default and mark old cache stale');
+      },
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('probe CLI continues with default thresholds when config threshold is invalid', () => {
+  const dir = tempDir();
+  const project = join(dir, 'project');
+  const state = join(dir, 'state');
+  const fixture = join(ROOT, 'tests', 'fixtures', 'codex-wham-low.json');
+  mkdirSync(project, { recursive: true });
+  mkdirSync(state, { recursive: true });
+  writeFileSync(join(project, '.budget-guard.conf'), 'BUDGET_HARD=101\n');
+  try {
+    const stdout = execFileSync(process.execPath, [join(ROOT, 'bin', 'probe.mjs'), 'codex', 'probe', '--fixture', fixture], {
+      cwd: project,
+      env: {
+        ...process.env,
+        HOME: dir,
+        PWD: project,
+        BUDGET_STATE_DIR: state,
+        BUDGET_HARD: undefined,
+      },
+      encoding: 'utf8',
+    });
+    const result = JSON.parse(stdout);
+    assert.equal(result.ok, true);
+    assert.equal(result.source, 'fixture');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

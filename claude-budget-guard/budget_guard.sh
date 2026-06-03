@@ -21,6 +21,11 @@
 set -uo pipefail
 AGENT="${1:-}"; PHASE="${2:-}"
 
+# 载入全局 + 项目配置(可选;两份都不存在则纯默认。必须在读 BUDGET_* 之前、
+# 且不能 cd —— 项目配置靠 $PWD 向上查找)
+_BGC_SELF_DIR="$(dirname "$0")"
+[ -f "$_BGC_SELF_DIR/budget-config.sh" ] && . "$_BGC_SELF_DIR/budget-config.sh" && load_budget_config
+
 # ───────── 可调参数 ─────────
 WARN_ONCE="${BUDGET_WARN_ONCE:-80}"        # T1:本窗口提醒一次
 WARN_REPEAT="${BUDGET_WARN_REPEAT:-${BUDGET_SOFT:-90}}" # T2:每次提醒(BUDGET_SOFT 为旧 alias)
@@ -33,6 +38,35 @@ CODEX_USAGE_URL="${BUDGET_CODEX_URL:-https://chatgpt.com/backend-api/wham/usage}
 STATE_DIR="${BUDGET_STATE_DIR:-$HOME/.budget-guard}"
 TMUX_TARGET="${BUDGET_TMUX_TARGET:-}"        # Codex TUI 目标,如 session:window.pane
 BUDGET_PROBE="${BUDGET_PROBE:-$HOME/.budget-guard/bin/budget-probe}"
+
+_bqg_uint_or_default() {
+  local value="$1" fallback="$2"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$((10#$value))"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+_bqg_validate_thresholds() {
+  local wo="$WARN_ONCE" wr="$WARN_REPEAT" hd="$HARD" invalid=0
+  [[ "$wo" =~ ^[0-9]+$ ]] || invalid=1
+  [[ "$wr" =~ ^[0-9]+$ ]] || invalid=1
+  [[ "$hd" =~ ^[0-9]+$ ]] || invalid=1
+  if (( invalid == 0 )); then
+    wo=$((10#$wo)); wr=$((10#$wr)); hd=$((10#$hd))
+    (( wo < wr && wr < hd && hd <= 100 )) || invalid=1
+  fi
+  if (( invalid != 0 )); then
+    WARN_ONCE=80; WARN_REPEAT=90; SOFT=90; HARD=92
+  else
+    WARN_ONCE="$wo"; WARN_REPEAT="$wr"; SOFT="$wr"; HARD="$hd"
+  fi
+}
+
+_bqg_validate_thresholds
+CACHE_TTL="$(_bqg_uint_or_default "$CACHE_TTL" 45)"
+HIST_WINDOW="$(_bqg_uint_or_default "$HIST_WINDOW" 900)"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 command -v jq >/dev/null 2>&1 || exit 0    # 没 jq 就静默放行

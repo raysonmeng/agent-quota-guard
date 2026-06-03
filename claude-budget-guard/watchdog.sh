@@ -16,6 +16,9 @@
 
 set -uo pipefail
 AGENT="${1:-}"
+# 载入全局 + 项目配置(可选;不能 cd —— 项目配置靠 $PWD 向上查找)
+_BGC_SELF_DIR="$(dirname "$0")"
+[ -f "$_BGC_SELF_DIR/budget-config.sh" ] && . "$_BGC_SELF_DIR/budget-config.sh" && load_budget_config
 STATE_DIR="${BUDGET_STATE_DIR:-$HOME/.budget-guard}"
 RESUME_BELOW="${BUDGET_RESUME_BELOW:-30}"     # 用量回落到此线下才算刷新
 ARM="${BUDGET_WATCHDOG_ARM:-0}"               # 0=dry-run,1=真执行

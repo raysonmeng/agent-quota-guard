@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// token-budget-guard — 统一安装 CLI(npx 入口)。
+// agent-quota-guard — 统一安装 CLI(npx 入口)。
 //
-//   token-budget-guard claude  [--uninstall] [--project] [--skip-doctor]
-//   token-budget-guard codex   [--uninstall]
-//   token-budget-guard --help
-//   token-budget-guard --version
+//   agent-quota-guard claude  [--uninstall] [--project] [--skip-doctor]
+//   agent-quota-guard codex   [--uninstall]
+//   agent-quota-guard --help
+//   agent-quota-guard --version
 //
 // 薄分发器:`claude` 调 Node 安装器(bin/install-claude.mjs);`codex` 调随包
 // 携带的 bash 安装器(codex-budget-guard/install.sh)。真正的逻辑都在那两个里
@@ -17,13 +17,13 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-const USAGE = `token-budget-guard —— Claude Code / Codex 额度守卫安装器
+const USAGE = `agent-quota-guard —— Claude Code / Codex 额度守卫安装器
 
 用法:
-  token-budget-guard claude  [选项]    安装到 Claude Code(~/.claude)
-  token-budget-guard codex   [选项]    安装到 Codex(~/.codex)
-  token-budget-guard --help            显示本帮助
-  token-budget-guard --version         显示版本
+  agent-quota-guard claude  [选项]    安装到 Claude Code(~/.claude)
+  agent-quota-guard codex   [选项]    安装到 Codex(~/.codex)
+  agent-quota-guard --help            显示本帮助
+  agent-quota-guard --version         显示版本
 
 通用选项(透传给底层安装器):
   --uninstall        只移除本工具装入的内容(保留 ~/.budget-guard/ 脚本)

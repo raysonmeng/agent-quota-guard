@@ -248,10 +248,15 @@ test("claude installer deploys only runtime bin files, not the installer CLIs", 
   // runtime executables MUST be deployed
   assert.ok(deployed.includes("probe.mjs"), "probe.mjs should be deployed");
   assert.ok(deployed.includes("guard.mjs"), "guard.mjs should be deployed");
+  assert.ok(deployed.includes("budget-probe"), "bash budget-probe should be deployed for watchdog/MCP compatibility");
+  assert.ok(deployed.includes("budget_guard.sh"), "bash budget_guard.sh should be deployed for upgrade/uninstall parity");
+  assert.ok(deployed.includes("watchdog.sh"), "watchdog.sh should be deployed for README cron/launchd usage");
+  assert.ok(deployed.includes("budget-config.sh"), "budget-config.sh should be deployed for bash runtime config loading");
   // installer-only CLIs MUST NOT pollute the user's runtime bin dir
   assert.ok(!deployed.includes("cli.mjs"), "cli.mjs (npx launcher) must not be deployed");
   assert.ok(
     !deployed.includes("install-claude.mjs"),
     "install-claude.mjs (installer shim) must not be deployed"
   );
+  assert.ok(!deployed.includes("install.sh"), "bash install.sh must not be deployed");
 });

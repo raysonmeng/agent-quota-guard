@@ -67,7 +67,7 @@ cd codex-budget-guard  && ./install.sh    # Codex
 
 **What the installer changes**
 
-- **Claude Code** — merges a hook into `~/.claude/settings.json` (your existing hooks are preserved) and writes a short "quota guard protocol" block into `~/.claude/CLAUDE.md` between removable markers.
+- **Claude Code** — merges a hook into `~/.claude/settings.json` (your existing hooks are preserved) and writes a short "quota guard protocol" block into `~/.claude/CLAUDE.md`, wrapped in removable `<!-- budget-guard:start -->` / `<!-- budget-guard:end -->` markers so it can be cleanly stripped.
 - **Codex** — adds hooks to `~/.codex/config.toml` `[hooks]`, registers a `budget-guard` MCP server, and writes the protocol into `~/.codex/AGENTS.md`.
 
 Re-open your agent session afterwards; `/hooks` should list `budget_guard`.
@@ -103,6 +103,24 @@ All settings are environment variables with sane defaults — you usually don't 
 | `BUDGET_MCP_TOOL_TIMEOUT_SEC` | `700000` | Codex MCP tool timeout (must exceed worst-case refresh wait) |
 
 Full list, including watchdog and endpoint overrides, lives in the source and the [technical design doc](docs/budget-guard-tech-design.html).
+
+### Config files (global + per-project)
+
+Instead of exporting env vars, you can put safe quota-tuning settings in two optional `KEY=value` files.
+
+- **Global** — `~/.budget-guard/config` (your defaults for every project)
+- **Project** — `.budget-guard.conf` in your project root (found by walking up from the working dir; commit it to share with your team)
+
+```ini
+# ~/.budget-guard/config  or  ./.budget-guard.conf
+BUDGET_WARN_ONCE=75
+BUDGET_WARN_REPEAT=88
+BUDGET_HARD=90
+```
+
+**Precedence (high → low):** environment variable **>** project config **>** global config **>** built-in default. Both files are optional; with neither present, behavior is exactly the built-in defaults.
+
+For safety, config files only accept known safe tuning keys: `BUDGET_WARN_ONCE`, `BUDGET_WARN_REPEAT`, `BUDGET_SOFT`, `BUDGET_HARD`, `BUDGET_CACHE_TTL`, `BUDGET_HIST_WINDOW`, and `BUDGET_CLAUDE_UA`. Command, credential, endpoint, debug-fixture, dispatch, path, and automation keys such as `BUDGET_PROBE`, token variables, `BUDGET_CODEX_URL`, `BUDGET_USAGE_FIXTURE`, `BUDGET_AGENT`, `BUDGET_PHASE`, `BUDGET_STATE_DIR`, `BUDGET_CHECKPOINT`, `BUDGET_WATCHDOG_ARM`, `BUDGET_RESUME_BELOW`, and `BUDGET_RESUME_PROMPT` must be set as explicit process environment variables.
 
 ---
 
@@ -146,7 +164,7 @@ Active development. Current state:
 - **Core** — Node implementation (usage probe, three-tier guard, blocking-MCP continuation) plus a Bash fallback. ✅
 - **Installers** — hardened through extensive cross-review against real-world configs (idempotency, byte-perfect uninstall, no user-config corruption). ✅
 - **Distribution** — `npx agent-quota-guard …` ready; **not yet published to npm** (publish pending).
-- **Tests** — 91 (core) + 38 (Codex MCP/installer) passing.
+- **Tests** — 112 (core) + 38 (Codex MCP/installer) passing.
 - **Verified on real machines** — Claude Code full loop (hooks, checkpoint, hard-stop, resume, watchdog) via tmux E2E; Codex interactive TUI; live usage endpoints for both. Codex headless hook-firing is a documented limitation, not a bug.
 
 ---
@@ -287,6 +305,24 @@ cd codex-budget-guard  && ./install.sh    # Codex
 
 完整清单(含 watchdog、端点覆盖)见源码与[技术方案文档](docs/budget-guard-tech-design.html)。
 
+### 配置文件(全局 + 项目两层)
+
+除了设环境变量,也可以把安全的额度调参项写进两个可选的 `KEY=value` 文件:
+
+- **全局** —— `~/.budget-guard/config`(你对所有项目的默认)
+- **项目** —— 项目根目录的 `.budget-guard.conf`(从工作目录向上查找;提交进 git 即可团队共享)
+
+```ini
+# ~/.budget-guard/config  或  ./.budget-guard.conf
+BUDGET_WARN_ONCE=75
+BUDGET_WARN_REPEAT=88
+BUDGET_HARD=90
+```
+
+**优先级(高 → 低):** 环境变量 **>** 项目配置 **>** 全局配置 **>** 内置默认。两份文件都可选;都不存在时行为与内置默认完全一致。
+
+出于安全考虑,配置文件只接受明确安全的调参 key:`BUDGET_WARN_ONCE`、`BUDGET_WARN_REPEAT`、`BUDGET_SOFT`、`BUDGET_HARD`、`BUDGET_CACHE_TTL`、`BUDGET_HIST_WINDOW`、`BUDGET_CLAUDE_UA`。命令、凭据、端点、调试 fixture、调度身份、路径和自动化控制类 key,例如 `BUDGET_PROBE`、token 变量、`BUDGET_CODEX_URL`、`BUDGET_USAGE_FIXTURE`、`BUDGET_AGENT`、`BUDGET_PHASE`、`BUDGET_STATE_DIR`、`BUDGET_CHECKPOINT`、`BUDGET_WATCHDOG_ARM`、`BUDGET_RESUME_BELOW`、`BUDGET_RESUME_PROMPT`,仍需显式设置为进程环境变量。
+
 ---
 
 ## 支持范围与诚实边界
@@ -329,7 +365,7 @@ cd codex-budget-guard  && ./install.sh    # Codex
 - **核心** —— Node 实现(用量探针、三档守卫、阻塞 MCP 续接)+ Bash 兜底。✅
 - **安装器** —— 经大量交叉审针对真实配置加固(幂等、字节级完美卸载、不破坏用户已有配置)。✅
 - **分发** —— `npx agent-quota-guard …` 已就绪;**尚未发布到 npm**(待发布)。
-- **测试** —— 91(核心)+ 38(Codex MCP / 安装器)全通过。
+- **测试** —— 112(核心)+ 38(Codex MCP / 安装器)全通过。
 - **真机已验证** —— Claude Code 全闭环(hook、checkpoint、硬停、续接、watchdog)tmux E2E;Codex 交互 TUI;两端真实 usage 端点。Codex headless 不触发 hook 是已记录的限制,非 bug。
 
 ---

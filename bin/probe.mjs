@@ -8,12 +8,21 @@
 // Exit codes (probe & doctor share the same scale):
 //   0 ok            1 warning (e.g. 429 gate active)
 //   2 partial info  3 schema empty (unrecognized response shape)
-//   4 config invalid (BUDGET_WARN_ONCE/REPEAT/HARD out of range)
+//   4 config invalid (doctor only; probe continues with built-in defaults)
 //
 // Env: BUDGET_USAGE_FIXTURE, BUDGET_NOW_EPOCH, BUDGET_CACHE_TTL,
 //      BUDGET_STATE_DIR, BUDGET_SOFT/WARN_ONCE/WARN_REPEAT/HARD.
 
-import { fetchUsage, doctor, checkThresholds } from '../lib/probe/index.mjs';
+import { fetchUsage, doctor } from '../lib/probe/index.mjs';
+
+async function loadBudgetConfigFailOpen() {
+  try {
+    const mod = await import('../lib/guard/config.mjs');
+    mod.loadBudgetConfig();
+  } catch (_) {
+    // Older or partial deployments may not have the optional config loader yet.
+  }
+}
 
 function parseArgs(argv) {
   const [agent, cmd, ...rest] = argv;
@@ -38,18 +47,7 @@ async function main() {
   const { agent, cmd, opts } = parseArgs(process.argv.slice(2));
   if (opts.help || !agent || !cmd) { usage(); process.exit(agent ? 0 : 2); }
 
-  // config gate first — invalid thresholds should NOT silently fall back
-  const th = checkThresholds(process.env);
-  if (!th.ok) {
-    if (cmd === 'doctor') {
-      process.stdout.write(`doctor[${agent}]: CONFIG INVALID\n`);
-      for (const e of th.errors) process.stdout.write(`  - ${e}\n`);
-      process.stdout.write(`falling back to defaults: warnOnce=${th.warnOnce} warnRepeat=${th.warnRepeat} hard=${th.hard}\n`);
-    } else {
-      process.stdout.write(JSON.stringify({ ok: false, agent, error: 'config_invalid', thresholds: th }) + '\n');
-    }
-    process.exit(4);
-  }
+  await loadBudgetConfigFailOpen(); // global + project .conf → process.env (env still wins)
 
   if (cmd === 'probe') {
     const result = await fetchUsage(agent, { fixture: opts.fixture });

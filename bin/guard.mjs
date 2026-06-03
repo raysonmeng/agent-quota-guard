@@ -11,6 +11,15 @@
 
 import { checkThresholds, run, runDoctor } from '../lib/guard/hook.mjs';
 
+async function loadBudgetConfigFailOpen() {
+  try {
+    const mod = await import('../lib/guard/config.mjs');
+    mod.loadBudgetConfig();
+  } catch (_) {
+    // Older or partial deployments may not have the optional config loader yet.
+  }
+}
+
 async function readStdin() {
   return new Promise((resolve) => {
     if (process.stdin.isTTY) { resolve(''); return; }
@@ -38,8 +47,11 @@ function parseInput(raw) {
 
 async function main() {
   const args = process.argv.slice(2);
-  const agent = process.env.BUDGET_AGENT || args[0];
-  const phase = process.env.BUDGET_PHASE || args[1];
+  const envAgent = process.env.BUDGET_AGENT;
+  const envPhase = process.env.BUDGET_PHASE;
+  await loadBudgetConfigFailOpen(); // global + project .conf → process.env (env still wins)
+  const agent = envAgent || args[0];
+  const phase = envPhase || args[1];
   if (!agent || !phase) return; // silent fail-open
 
   const th = checkThresholds(process.env);

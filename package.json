@@ -8,8 +8,8 @@
   "description": "Claude Code / Codex 额度守卫:跑长任务时实时感知订阅额度,接近上限在轮末干净暂停 + 写 checkpoint,刷新后续接。",
   "type": "module",
   "bin": {
-    "token-budget-guard": "bin/cli.mjs",
-    "tbg": "bin/cli.mjs"
+    "agent-quota-guard": "bin/cli.mjs",
+    "aqg": "bin/cli.mjs"
   },
   "files": [
     "bin/cli.mjs",
@@ -21,10 +21,12 @@
     "claude-budget-guard/budget_guard.sh",
     "claude-budget-guard/watchdog.sh",
     "claude-budget-guard/budget-probe",
+    "claude-budget-guard/budget-config.sh",
     "codex-budget-guard/install.sh",
     "codex-budget-guard/budget_guard.sh",
     "codex-budget-guard/watchdog.sh",
     "codex-budget-guard/budget-probe",
+    "codex-budget-guard/budget-config.sh",
     "codex-budget-guard/mcp-server.mjs",
     "codex-budget-guard/mcp-tools.mjs",
     "codex-budget-guard/package.json",

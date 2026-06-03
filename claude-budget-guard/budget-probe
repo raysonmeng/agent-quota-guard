@@ -10,8 +10,21 @@ else
   AGENT="${1:-}"
 fi
 
+# 载入全局 + 项目配置(可选;不能 cd —— 项目配置靠 $PWD 向上查找)
+_BGC_SELF_DIR="$(dirname "$0")"
+[ -f "$_BGC_SELF_DIR/budget-config.sh" ] && . "$_BGC_SELF_DIR/budget-config.sh" && load_budget_config
+
+_bqp_uint_or_default() {
+  local value="$1" fallback="$2"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$((10#$value))"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
 STATE_DIR="${BUDGET_STATE_DIR:-$HOME/.budget-guard}"
-CACHE_TTL="${BUDGET_CACHE_TTL:-45}"
+CACHE_TTL="$(_bqp_uint_or_default "${BUDGET_CACHE_TTL:-45}" 45)"
 NOW="${BUDGET_NOW_EPOCH:-$(date +%s)}"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 
@@ -102,7 +115,7 @@ read_claude_token() {
 }
 
 curl_usage() {
-  local tmp_body tmp_hdr status retry_after url token account_id auth_line
+  local tmp_body tmp_hdr status retry_after url token account_id auth_line claude_ua
   tmp_body=$(mktemp "${TMPDIR:-/tmp}/budget-probe-body.XXXXXX")
   tmp_hdr=$(mktemp "${TMPDIR:-/tmp}/budget-probe-hdr.XXXXXX")
   case "$AGENT" in
@@ -131,11 +144,12 @@ curl_usage() {
         return 2
       }
       url="${BUDGET_CLAUDE_URL:-https://api.anthropic.com/api/oauth/usage}"
+      claude_ua="${BUDGET_CLAUDE_UA:-claude-code/${BUDGET_CLAUDE_VERSION:-unknown}}"
       status=$(curl -sS --max-time "${BUDGET_HTTP_MAX_TIME:-10}" \
         -D "$tmp_hdr" -o "$tmp_body" -w '%{http_code}' "$url" \
         -H "Authorization: Bearer $token" \
         -H "anthropic-beta: oauth-2025-04-20" \
-        -H "User-Agent: claude-code/${BUDGET_CLAUDE_VERSION:-unknown}" \
+        -H "User-Agent: $claude_ua" \
         -H "Accept: application/json" 2>/dev/null || echo "000")
       ;;
     *)
