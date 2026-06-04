@@ -248,6 +248,8 @@ test('parseUsage claude: sonnet bucket wins (highest resettable util)', () => {
   assert.equal(r.ok, true);
   assert.equal(r.util, 88, 'hard_max should be sonnet util');
   assert.equal(r.bucket_id, 'seven_day_sonnet');
+  // when all buckets are resettable, warn winner == hard winner
+  assert.equal(r.warn_bucket_id, 'seven_day_sonnet');
   // extra_usage must NOT drive util
   assert.ok(r.util <= 88, 'extra_usage must not inflate util to 99');
 });
@@ -289,6 +291,7 @@ test('parseUsage claude: all-null → schema_no_buckets, ok=false', () => {
   assert.equal(r.error, 'schema_no_buckets');
   assert.equal(r.util, 0);
   assert.equal(r.bucket_id, '');
+  assert.equal(r.warn_bucket_id, '');
 });
 
 test('parseUsage claude: no resettable bucket → util=0, warn_util>0, bucket_id=""', () => {
@@ -301,6 +304,23 @@ test('parseUsage claude: no resettable bucket → util=0, warn_util>0, bucket_id
   assert.equal(r.util, 0, 'util (hard_max) should be 0 — no resettable bucket wins');
   assert.equal(r.warn_util, 70, 'warn_util takes any util-bearing bucket');
   assert.equal(r.bucket_id, '', 'no resettable bucket → bucket_id is empty string');
+  assert.equal(r.warn_bucket_id, 'iguana_necktie', 'warn_bucket_id names the true max even when non-resettable');
+});
+
+test('parseUsage claude: hardWinner≠warnWinner — warn_bucket_id names the true max, bucket_id stays the resettable winner', () => {
+  const raw = {
+    five_hour: { utilization: 50, resets_at: '2026-06-02T07:00:00Z' }, // resettable → hard winner
+    weekly_capped: { utilization: 95 }, // no resets_at → non-resettable, but the true max (warn winner)
+  };
+  const r = parseUsage('claude', raw, NOW);
+  assert.equal(r.ok, true);
+  // hard_max trio (util/bucket_id/reset) stays on the resettable winner —
+  // keeps reset pairing + fingerprint + watchdog consistent.
+  assert.equal(r.util, 50);
+  assert.equal(r.bucket_id, 'five_hour');
+  // warn_max names the bucket actually at the top — what gating + usageDetail use.
+  assert.equal(r.warn_util, 95);
+  assert.equal(r.warn_bucket_id, 'weekly_capped');
 });
 
 test('parseUsage claude: empty object → schema_no_buckets', () => {

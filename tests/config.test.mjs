@@ -365,6 +365,72 @@ test("Bash guard hard-line message names the driving Codex usage window", async 
   await rm(root, { recursive: true, force: true });
 });
 
+test("Bash budget-probe emits warn_bucket_id; bucket_id stays the resettable winner (no warn fallback)", async () => {
+  const { root, state } = await scratch();
+  const fx = join(root, "codex-nonreset-max.json");
+  // primary=50 resettable (hard winner); secondary=95 with NO reset_at
+  // (non-resettable → not a hard winner, but the true max → warn winner).
+  await writeFile(fx, JSON.stringify({
+    rate_limit: {
+      primary_window: { used_percent: 50, reset_at: 9999999999, reset_after_seconds: 3600 },
+      secondary_window: { used_percent: 95 }
+    },
+    additional_rate_limits: []
+  }) + "\n");
+
+  const result = await runCommand("bash", [join(rootDir, "codex-budget-guard", "budget-probe"), "codex"], {
+    cwd: root,
+    env: { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_USAGE_FIXTURE: fx, BUDGET_NOW_EPOCH: "1000" },
+    timeout: 10_000
+  });
+
+  assert.equal(result.code, 0, `budget-probe should parse, stderr=${result.stderr}`);
+  const parsed = JSON.parse(result.stdout);
+  assert.equal(parsed.util, 50, "util = hard_max (resettable winner)");
+  assert.equal(parsed.bucket_id, "rate_limit.primary_window", "bucket_id = resettable hard winner, NOT the warn fallback");
+  assert.equal(parsed.warn_util, 95, "warn_util = max across all windows");
+  assert.equal(parsed.warn_bucket_id, "rate_limit.secondary_window", "warn_bucket_id names the true max");
+  await rm(root, { recursive: true, force: true });
+});
+
+test("Bash guard hard line gates on warn_util and labels 触发窗口 by warn_bucket_id (parity with Node)", async () => {
+  const { root, state, deep } = await scratch();
+  const fakeProbe = join(root, "fake-probe");
+  // hard_util=50 (would NOT trip the old .util gate), warn_util=95 (trips it).
+  // warn_bucket_id (secondary) must be the label, not bucket_id (primary).
+  await writeFile(fakeProbe, [
+    "#!/usr/bin/env bash",
+    "cat <<'JSON'",
+    JSON.stringify({
+      ok: true,
+      agent: "codex",
+      util: 50,
+      hard_util: 50,
+      warn_util: 95,
+      bucket_id: "rate_limit.primary_window",
+      warn_bucket_id: "rate_limit.secondary_window",
+      reset_epoch: 1780488339,
+      buckets: [
+        { id: "rate_limit.primary_window", util: 50, reset_epoch: 1780488339, resettable: true },
+        { id: "rate_limit.secondary_window", util: 95, reset_epoch: 0, resettable: false }
+      ]
+    }),
+    "JSON"
+  ].join("\n") + "\n", { mode: 0o755 });
+
+  const result = await runCommand("bash", [join(rootDir, "codex-budget-guard", "budget_guard.sh"), "codex", "pre"], {
+    cwd: deep,
+    env: { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe },
+    timeout: 10_000
+  });
+
+  assert.equal(result.code, 0, `budget_guard should deny without crashing, stderr=${result.stderr}`);
+  assert.match(result.stdout, /额度已达硬线\(95% ≥ 92%\)/, "gates + displays warn_util=95, not hard_util=50");
+  assert.match(result.stdout, /触发窗口:rate_limit\.secondary_window/, "labels the warn winner");
+  assert.doesNotMatch(result.stdout, /触发窗口:rate_limit\.primary_window/, "not the resettable hard winner");
+  await rm(root, { recursive: true, force: true });
+});
+
 test("Bash probe falls back when config cache TTL is invalid", async () => {
   const { root, state, proj, deep } = await scratch();
   await writeFile(join(state, "probe_codex.json"), JSON.stringify({

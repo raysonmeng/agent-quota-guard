@@ -131,9 +131,12 @@ fetch_usage() {
   now=$(date +%s)
   if [[ -x "$BUDGET_PROBE" ]]; then
     probed=$("$BUDGET_PROBE" --agent "$AGENT" 2>/dev/null || true)
-    util=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | .util // empty' 2>/dev/null || true)
+    # gate on warn_util (max across ALL windows, incl. non-resettable) to match
+    # the Node hook — all phases agree on warn_util; fall back to .util for older
+    # probes. reset stays the hard (resettable) winner's epoch below.
+    util=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | (.warn_util // .util) // empty' 2>/dev/null || true)
     reset=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | .reset_epoch // 0' 2>/dev/null || true)
-    bucket=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | (.bucket_id // empty | tostring | gsub("[[:space:]]+";"_"))' 2>/dev/null || true)
+    bucket=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | ((.warn_bucket_id // .bucket_id) // empty | tostring | gsub("[[:space:]]+";"_"))' 2>/dev/null || true)
     buckets=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | [.buckets[]? | select(.util != null) | "\((.id // "unknown") | tostring | gsub("[[:space:]]+";"_"))=\((.util // 0) | floor)%"] | join(",")' 2>/dev/null || true)
     if [[ -n "$util" && "$util" =~ ^[0-9]+$ ]]; then
       [[ "$reset" =~ ^[0-9]+$ ]] || reset=0

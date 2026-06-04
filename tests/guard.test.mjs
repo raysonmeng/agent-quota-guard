@@ -552,6 +552,34 @@ test('phasePre: hard deny reason names the driving Codex usage window', async ()
   }
 });
 
+test('phasePre: 触发窗口 names the warn winner when a non-resettable bucket is the real max', async () => {
+  const dir = tempDir();
+  try {
+    // primary=50 (resettable → hard winner); secondary=95 with NO reset_at
+    // (non-resettable → not a hard winner, but the true max → warn winner).
+    const codexFx = join(dir, 'codex-nonreset-max.json');
+    writeFileSync(codexFx, JSON.stringify({
+      rate_limit: {
+        primary_window: { used_percent: 50, reset_at: NOW + 3600, limit_window_seconds: 18000, reset_after_seconds: 3600 },
+        secondary_window: { used_percent: 95 },
+      },
+      additional_rate_limits: [],
+    }));
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: codexFx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePre('codex', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH),
+    );
+    const reason = result?.hookSpecificOutput?.permissionDecisionReason || '';
+    // gating + label both follow warn_util=95 (the non-resettable real max)
+    assert.match(reason, /额度 95%≥92% 硬线/);
+    assert.match(reason, /触发窗口:rate_limit\.secondary_window/);
+    // the resettable hard winner (primary=50) must NOT be labeled as the trigger
+    assert.doesNotMatch(reason, /触发窗口:rate_limit\.primary_window/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── fingerprint: resetless self-aging re-arm (review round-4) ─────────────
 
 test('shouldFire: resetless fp self-ages without pruneNotified (re-arms after BUDGET_FP_MAX_AGE)', () => {
