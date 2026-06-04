@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 沟通语言 / Communication language
+
+**永远用中文回复用户。** 无论用户用什么语言提问,所有面向用户的回复一律用中文(代码、命令、标识符、引用的英文术语保持原文)。同样适用于 `AGENTS.md`(Codex 入口),两份文档保持一致。
+
 ## 项目本质 / What this is
 
 纯 Bash 实现的「额度守卫」:让 Claude Code 和 Codex 在跑长任务时实时感知订阅额度,接近上限时在**轮末干净暂停 + 写 checkpoint**,而非执行中途被硬切。不读日志、不估算,直接查官方 usage 端点。

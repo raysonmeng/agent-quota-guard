@@ -4,6 +4,10 @@
 
 如需更新项目结构、开发命令、测试方式、提交约定、安全配置或 agent 行为约束，请只修改 `CLAUDE.md`，避免两份 onboarding 文档漂移。
 
+## 沟通语言 / Communication language
+
+**永远用中文回复用户。** 无论用户用什么语言提问,所有面向用户的回复一律用中文(代码、命令、标识符、引用的英文术语保持原文)。详见 [CLAUDE.md](CLAUDE.md) 的同名章节。
+
 <!-- AgentBridge:start -->
 ## AgentBridge — Multi-Agent Collaboration
 
