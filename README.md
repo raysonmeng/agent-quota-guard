@@ -60,10 +60,13 @@ A zero-dependency launcher: `claude` runs the Node installer, `codex` runs the b
 git clone https://github.com/raysonmeng/agent-quota-guard.git
 cd agent-quota-guard
 
-cd claude-budget-guard && ./install.sh    # Claude Code
-# or
-cd codex-budget-guard  && ./install.sh    # Codex
+./install.sh              # both agents in one go (Claude Code + Codex)
+./install.sh claude       # just Claude Code
+./install.sh codex        # just Codex
+./install.sh --uninstall  # remove both
 ```
+
+The root `install.sh` is a thin wrapper that runs both per-agent installers in sequence (each is idempotent and backs up files before changing them); one agent failing doesn't block the other.
 
 **What the installer changes**
 
@@ -270,10 +273,13 @@ npx agent-quota-guard claude --uninstall  # 卸载
 git clone https://github.com/raysonmeng/agent-quota-guard.git
 cd agent-quota-guard
 
-cd claude-budget-guard && ./install.sh    # Claude Code
-# 或
-cd codex-budget-guard  && ./install.sh    # Codex
+./install.sh              # 一键装两个(Claude Code + Codex)
+./install.sh claude       # 只装 Claude Code
+./install.sh codex        # 只装 Codex
+./install.sh --uninstall  # 卸载两个
 ```
+
+根目录 `install.sh` 是薄包装:依次调用两个子安装器(各自幂等、改前自动 `.bak`);一个 agent 失败不阻断另一个。
 
 **安装器会改什么**
 

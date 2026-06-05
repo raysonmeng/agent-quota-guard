@@ -58,9 +58,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 常用命令
 
 ```bash
-# 安装 / 卸载(分别在各自目录;幂等,改动前自动 .bak)
-cd claude-budget-guard && ./install.sh            # 或 codex-budget-guard
-./install.sh --uninstall
+# 安装 / 卸载(根目录一键;幂等,改动前自动 .bak)
+./install.sh                  # 一次装 Claude + Codex;可加 claude|codex 只装一个
+./install.sh --uninstall      # 卸载两个(也可 ./install.sh claude --uninstall)
+# 子安装器仍可单独跑:cd claude-budget-guard && ./install.sh(codex 同理)
 
 # 语法检查(无 CI,提交前手动跑)
 bash -n claude-budget-guard/budget_guard.sh

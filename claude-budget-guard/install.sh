@@ -14,7 +14,7 @@
 # 硬线在轮末干净暂停 + 写 checkpoint,新会话发「继续」自动续接。
 # watchdog(额度刷新后自动续跑)默认不启用,见末尾说明。
 #
-# 运行期依赖 jq;本安装脚本额外需要 node 22+(转发到 Node installer)。
+# 运行期依赖 jq;本安装脚本额外需要 node >= 18(转发到 Node installer)。
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -25,7 +25,7 @@ if command -v node >/dev/null 2>&1; then
 fi
 
 if [[ "${1:-}" != "--uninstall" ]]; then
-  echo "✗  需要 node 22+ 来运行新版 installer(./install.sh 已转发到它)" >&2
+  echo "✗  需要 node >= 18 来运行新版 installer(./install.sh 已转发到它)" >&2
   echo "   路径: $REPO_ROOT/bin/install-claude.mjs" >&2
   exit 1
 fi
