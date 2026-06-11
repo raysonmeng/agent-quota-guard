@@ -304,6 +304,15 @@ test('burnFieldsForBucket: basic runway = (100 − util)/rate when shorter than 
   assert.equal(fields.depleted_at_epoch, NOW + 60000);
 });
 
+test('burnFieldsForBucket: confident weekly window reports remaining 5h windows from runway', () => {
+  const history = historyWith({ ...ewmaState(10, 13), rate_pct_per_hour: 1.1 }, 'long');
+  // rate 1.1 %/h, util 83 → 15.454h runway → 3.1 five-hour windows.
+  const bucket = { id: 'seven_day', util: 83, reset_epoch: NOW + 100 * 3600 };
+  const fields = burnFieldsForBucket(history, bucket, NOW);
+  assert.equal(fields.burn_confident, true);
+  assert.equal(fields.five_hour_windows_left, 3.1);
+});
+
 test('burnFieldsForBucket: runway truncated at reset_epoch − now when burn is slow', () => {
   const history = historyWith({ ...ewmaState(10, 2), rate_pct_per_hour: 0.5 });
   const bucket = { id: 'five_hour', util: 80, reset_epoch: NOW + 6 * 3600 };
@@ -342,6 +351,29 @@ test('burnFieldsForBucket: non-confident long window reports burn_confident=fals
   const bucket = { id: 'seven_day', util: 50, reset_epoch: NOW + 86400 };
   const fields = burnFieldsForBucket(history, bucket, NOW);
   assert.equal(fields.burn_confident, false);
+});
+
+test('burnFieldsForBucket: five_hour_windows_left is omitted unless weekly runway is confident', () => {
+  const short = burnFieldsForBucket(
+    historyWith(ewmaState(10, 2), 'short'),
+    { id: 'five_hour', util: 50, reset_epoch: NOW + 86400 },
+    NOW,
+  );
+  assert.ok(!('five_hour_windows_left' in short));
+
+  const unconfidentWeekly = burnFieldsForBucket(
+    historyWith(ewmaState(10, 2), 'long'),
+    { id: 'seven_day', util: 50, reset_epoch: NOW + 86400 },
+    NOW,
+  );
+  assert.ok(!('five_hour_windows_left' in unconfidentWeekly));
+
+  const noRunway = burnFieldsForBucket(
+    historyWith({ ...ewmaState(10, 13), rate_pct_per_hour: 0 }, 'long'),
+    { id: 'seven_day', util: 50, reset_epoch: 0 },
+    NOW,
+  );
+  assert.ok(!('five_hour_windows_left' in noRunway));
 });
 
 test('enrichBuckets: buckets without history pass through unchanged (same reference)', () => {
