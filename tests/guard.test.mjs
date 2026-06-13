@@ -8,7 +8,7 @@
 
 import assert from 'node:assert/strict';
 import {
-  mkdtempSync, rmSync, symlinkSync, writeFileSync, mkdirSync,
+  existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync, mkdirSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -16,7 +16,10 @@ import test from 'node:test';
 
 import { shouldFire } from '../lib/guard/fingerprint.mjs';
 import { isCheckpointWrite } from '../lib/guard/checkpoint.mjs';
-import { phasePost, phasePre, phaseStop } from '../lib/guard/hook.mjs';
+import * as hook from '../lib/guard/hook.mjs';
+import { writeCache } from '../lib/probe/index.mjs';
+
+const { phasePost, phasePre, phaseStop } = hook;
 
 // ─── helpers ────────────────────────────────────────────────────────────────
 
@@ -527,7 +530,7 @@ test('phasePost: fail-open — fetchUsage returns ok:false → null output', asy
   }
 });
 
-test('phasePre: hard deny reason names the driving Codex usage window', async () => {
+test('phasePre: hard reminder names the driving Codex usage window without denying', async () => {
   const dir = tempDir();
   try {
     const codexFx = join(dir, 'codex-primary-hard.json');
@@ -543,16 +546,19 @@ test('phasePre: hard deny reason names the driving Codex usage window', async ()
       () => phasePre('codex', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH),
     );
 
-    const reason = result?.hookSpecificOutput?.permissionDecisionReason || '';
-    assert.match(reason, /额度 100%≥92% 硬线/);
-    assert.match(reason, /触发窗口:rate_limit\.primary_window/);
-    assert.match(reason, /rate_limit\.secondary_window=71%/);
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    assert.equal(result?.hookSpecificOutput?.permissionDecisionReason, undefined);
+    const msg = result?.systemMessage || '';
+    assert.match(msg, /额度 100%≥92% 硬线/);
+    assert.match(msg, /触发窗口:rate_limit\.primary_window/);
+    assert.match(msg, /rate_limit\.secondary_window=71%/);
+    assert.match(msg, /不会强制拦截/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('phasePre: 触发窗口 names the warn winner when a non-resettable bucket is the real max', async () => {
+test('phasePre: reminder 触发窗口 names the warn winner when a non-resettable bucket is the real max', async () => {
   const dir = tempDir();
   try {
     // primary=50 (resettable → hard winner); secondary=95 with NO reset_at
@@ -569,12 +575,601 @@ test('phasePre: 触发窗口 names the warn winner when a non-resettable bucket 
       { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: codexFx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
       () => phasePre('codex', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH),
     );
-    const reason = result?.hookSpecificOutput?.permissionDecisionReason || '';
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    const msg = result?.systemMessage || '';
     // gating + label both follow warn_util=95 (the non-resettable real max)
-    assert.match(reason, /额度 95%≥92% 硬线/);
-    assert.match(reason, /触发窗口:rate_limit\.secondary_window/);
+    assert.match(msg, /额度 95%≥92% 硬线/);
+    assert.match(msg, /触发窗口:rate_limit\.secondary_window/);
     // the resettable hard winner (primary=50) must NOT be labeled as the trigger
-    assert.doesNotMatch(reason, /触发窗口:rate_limit\.primary_window/);
+    assert.doesNotMatch(msg, /触发窗口:rate_limit\.primary_window/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('selectFinishingBucket: confident runway below horizon is a strong finish signal', () => {
+  assert.equal(typeof hook.selectFinishingBucket, 'function');
+  const result = hook.selectFinishingBucket({
+    warn_bucket_id: 'five_hour',
+    bucket_id: 'seven_day',
+    buckets: [
+      {
+        id: 'five_hour',
+        util: 80,
+        burn_confident: true,
+        burn_rate_pct_per_hour: 60,
+        runway_seconds: 1200,
+      },
+      {
+        id: 'seven_day',
+        util: 80,
+        burn_confident: true,
+        burn_rate_pct_per_hour: 8,
+        runway_seconds: 9000,
+      },
+    ],
+  }, 1800);
+
+  assert.equal(result.level, 'strong');
+  assert.equal(result.bucket?.id, 'five_hour');
+  assert.equal(result.runwaySeconds, 1200);
+});
+
+test('selectFinishingBucket: asymmetric burn — picks the fastest-filling bucket, not the warn winner', () => {
+  // MEDIUM fix: the warn winner is purely the highest-util bucket (probe/claude.mjs
+  // warnWinner ignores burn rate). Here the warn winner (seven_day, util 85) burns
+  // slowly: genuine burn-to-full = (100-85)/5*3600 = 10800s = 3h. A *different*,
+  // lower-util bucket (five_hour, util 70) burns fast: (100-70)/180*3600 = 600s =
+  // 10min < horizon. selectFinishingBucket must walk ALL buckets and flag the
+  // fastest-filling one as a strong finish signal, not just look at the warn winner.
+  assert.equal(typeof hook.selectFinishingBucket, 'function');
+  const result = hook.selectFinishingBucket({
+    warn_bucket_id: 'seven_day',
+    bucket_id: 'seven_day',
+    buckets: [
+      {
+        id: 'five_hour',
+        util: 70,
+        burn_confident: true,
+        burn_rate_pct_per_hour: 180,
+        // genuine burn-to-full = (100-70)/180*3600 = 600s < 1800 horizon.
+        runway_seconds: 600,
+      },
+      {
+        id: 'seven_day',
+        util: 85,
+        burn_confident: true,
+        burn_rate_pct_per_hour: 5,
+        // genuine burn-to-full = (100-85)/5*3600 = 10800s = 3h (well above horizon).
+        runway_seconds: 10800,
+      },
+    ],
+  }, 1800);
+
+  // Current impl only inspects the warn winner (seven_day, 10800s) → returns
+  // soft on the slow bucket. Correct behavior: strong on the fast five_hour bucket.
+  assert.equal(result.level, 'strong');
+  assert.equal(result.bucket?.id, 'five_hour');
+  assert.equal(result.runwaySeconds, 600);
+});
+
+test('selectFinishingBucket: confident runway at or above horizon is a soft finish signal', () => {
+  assert.equal(typeof hook.selectFinishingBucket, 'function');
+  const result = hook.selectFinishingBucket({
+    warn_bucket_id: 'five_hour',
+    buckets: [
+      {
+        id: 'five_hour',
+        util: 90,
+        burn_confident: true,
+        burn_rate_pct_per_hour: 10,
+        runway_seconds: 3600,
+      },
+    ],
+  }, 1800);
+
+  assert.equal(result.level, 'soft');
+  assert.equal(result.runwaySeconds, 3600);
+});
+
+test('selectFinishingBucket: reset-bound capped runway below horizon does not become strong', () => {
+  assert.equal(typeof hook.selectFinishingBucket, 'function');
+  const result = hook.selectFinishingBucket({
+    warn_bucket_id: 'five_hour',
+    buckets: [
+      {
+        id: 'five_hour',
+        util: 30,
+        burn_confident: true,
+        burn_rate_pct_per_hour: 0.5,
+        // burn-rate truncates runway at reset, but true burn-to-full is 140h.
+        runway_seconds: 600,
+        depleted_at_epoch: NOW + 600,
+        reset_epoch: NOW + 600,
+      },
+    ],
+  }, 1800);
+
+  assert.equal(result.level, 'static');
+  assert.equal(result.runwaySeconds, null);
+});
+
+test('selectFinishingBucket: unconfident, missing runway, or empty buckets fall back to static', () => {
+  assert.equal(typeof hook.selectFinishingBucket, 'function');
+
+  assert.equal(hook.selectFinishingBucket({
+    warn_bucket_id: 'five_hour',
+    buckets: [{ id: 'five_hour', burn_confident: false, runway_seconds: 1200 }],
+  }, 1800).level, 'static');
+
+  assert.equal(hook.selectFinishingBucket({
+    warn_bucket_id: 'five_hour',
+    buckets: [{ id: 'five_hour', burn_confident: true }],
+  }, 1800).level, 'static');
+
+  assert.equal(hook.selectFinishingBucket({
+    warn_bucket_id: 'five_hour',
+    buckets: [{ id: 'five_hour', burn_confident: true, burn_rate_pct_per_hour: 120 }],
+  }, 1800).level, 'static');
+
+  assert.equal(hook.selectFinishingBucket({ warn_bucket_id: 'five_hour', buckets: [] }, 1800).level, 'static');
+});
+
+test('selectFinishingBucket: when warn winner and fastest-filling diverge, picks the soonest to fill', () => {
+  // Both buckets are below the horizon (both are finish signals on their own),
+  // but the warn winner (seven_day, util 95, the highest-util bucket) fills in
+  // (100-95)/6*3600 = 3000s, while a lower-util bucket (five_hour, util 60)
+  // fills sooner: (100-60)/180*3600 = 800s. The selector must report the
+  // soonest-to-fill bucket (five_hour, 800s), not the warn winner.
+  const result = hook.selectFinishingBucket({
+    warn_bucket_id: 'seven_day',
+    bucket_id: 'seven_day',
+    buckets: [
+      { id: 'seven_day', util: 95, burn_confident: true, burn_rate_pct_per_hour: 6, runway_seconds: 3000 },
+      { id: 'five_hour', util: 60, burn_confident: true, burn_rate_pct_per_hour: 180, runway_seconds: 800 },
+    ],
+  }, 1800);
+
+  assert.equal(result.level, 'strong');
+  assert.equal(result.bucket?.id, 'five_hour');
+  assert.equal(result.runwaySeconds, 800);
+});
+
+test('finishingHorizonSec: BUDGET_FINISHING_HORIZON env overrides the default only for unsigned integers', () => {
+  assert.equal(typeof hook.finishingHorizonSec, 'function');
+
+  assert.equal(withEnv({ BUDGET_FINISHING_HORIZON: undefined }, () => hook.finishingHorizonSec()), 1800);
+  assert.equal(withEnv({ BUDGET_FINISHING_HORIZON: '900' }, () => hook.finishingHorizonSec()), 900);
+  assert.equal(withEnv({ BUDGET_FINISHING_HORIZON: '15m' }, () => hook.finishingHorizonSec()), 1800);
+});
+
+test('phasePre: fail-open when usage is unavailable', async () => {
+  const dir = tempDir();
+  try {
+    const nullFixture = join(dir, 'null-fixture.json');
+    writeFileSync(nullFixture, JSON.stringify({
+      five_hour: null,
+      seven_day: null,
+    }));
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: nullFixture, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH),
+    );
+    assert.equal(result, null, 'phasePre fail-open: bad probe → null output, no throw');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: confident runway below horizon triggers finishing reminder before hard line', async () => {
+  const dir = tempDir();
+  try {
+    const raw = {
+      five_hour: { utilization: 80, resets_at: new Date((NOW + 7200) * 1000).toISOString() },
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('claude', { fetched_at: NOW, raw, cap_util: 80 }), true);
+      writeFileSync(join(dir, 'burn_claude.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          five_hour: {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 120,
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600,
+            },
+          },
+        },
+      }));
+      return phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    const msg = result?.hookSpecificOutput?.additionalContext || '';
+    assert.match(msg, /额度 80%\(硬线 92%\)/);
+    assert.match(msg, /距打满 约 10 分钟/);
+    assert.match(msg, /低于收尾窗口 约 30 分钟/);
+    assert.doesNotMatch(msg, /80%≥92% 硬线/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: reset-bound capped runway below horizon does not trigger early finishing reminder', async () => {
+  const dir = tempDir();
+  try {
+    const raw = {
+      five_hour: { utilization: 30, resets_at: new Date((NOW + 605) * 1000).toISOString() },
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('claude', { fetched_at: NOW, raw, cap_util: 30 }), true);
+      writeFileSync(join(dir, 'burn_claude.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          five_hour: {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 0.5,
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600,
+            },
+          },
+        },
+      }));
+      return phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    assert.equal(result, null, 'reset-bound runway must not emit util<hard early finishing reminder');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: hard-line reset-bound runway uses static reminder without burn-to-full wording', async () => {
+  const dir = tempDir();
+  try {
+    const raw = {
+      five_hour: { utilization: 95, resets_at: new Date((NOW + 605) * 1000).toISOString() },
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('claude', { fetched_at: NOW, raw, cap_util: 95 }), true);
+      writeFileSync(join(dir, 'burn_claude.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          five_hour: {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 0.5,
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600,
+            },
+          },
+        },
+      }));
+      return phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    const msg = result?.hookSpecificOutput?.additionalContext || '';
+    assert.match(msg, /额度 95%≥92% 硬线/);
+    assert.doesNotMatch(msg, /距打满/);
+    assert.doesNotMatch(msg, /低于收尾窗口|高于收尾窗口/);
+    assert.match(msg, /不会强制拦截/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: strong finishing line names finishing.bucket (fast bucket), not the warn-winner headline bucket', async () => {
+  // Cross-bucket consistency (LOW fix). Asymmetric burn:
+  //   - seven_day util 85 (warn winner = highest util → headline %), slow burn
+  //     (rate 5 → genuine burn-to-full (100-85)/5*3600 = 10800s = 3h ≫ horizon)
+  //   - five_hour util 70 (lower util, NOT the warn winner), fast burn
+  //     (rate 180 → genuine burn-to-full (100-70)/180*3600 = 600s = 10min < horizon)
+  // selectFinishingBucket picks five_hour (soonest to fill) → strong. The headline
+  // describes the warn state (85%, seven_day) but the "距打满" clause MUST be
+  // attributed to five_hour(70%) — the bucket the 10-min figure was computed from —
+  // otherwise the reader thinks seven_day fills in 10 minutes (it fills in 3h).
+  const dir = tempDir();
+  try {
+    const raw = {
+      seven_day: { utilization: 85, resets_at: new Date((NOW + 8 * 86400) * 1000).toISOString() },
+      five_hour: { utilization: 70, resets_at: new Date((NOW + 7200) * 1000).toISOString() },
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('claude', { fetched_at: NOW, raw, cap_util: 85 }), true);
+      writeFileSync(join(dir, 'burn_claude.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          five_hour: {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 180, // fast → 600s burn-to-full
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600, // 1h span ≥ short min
+            },
+          },
+          seven_day: {
+            kind: 'long',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 5, // slow → 10800s burn-to-full
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 13 * 3600, // 13h span ≥ long min (12h)
+            },
+          },
+        },
+      }));
+      return phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    const msg = result?.hookSpecificOutput?.additionalContext || '';
+    // headline: warn winner (seven_day, 85%) — still describes the warn state.
+    assert.match(msg, /额度 85%\(硬线 92%\)/);
+    assert.match(msg, /触发窗口:seven_day/);
+    // strong level (below horizon) → 低于收尾窗口, with the 10-min runway.
+    assert.match(msg, /低于收尾窗口 约 30 分钟/);
+    assert.match(msg, /距打满 约 10 分钟/);
+    // CRITICAL: the "距打满" clause is attributed to the fast finishing bucket
+    // (five_hour, 70%), NOT the headline's seven_day. The fast bucket's id+util
+    // appear immediately before the burn-to-full duration.
+    assert.match(msg, /窗口 five_hour\(70%\)按当前消耗速度预计距打满 约 10 分钟/);
+    // and the slow warn-winner bucket id must NOT be the one credited with the
+    // 10-minute burn-to-full (it fills in 3h, not 10min).
+    assert.doesNotMatch(msg, /窗口 seven_day[^，]*距打满/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: genuine slow burn far below hard with no fast bucket → claude silent (soft never strong, no early line)', async () => {
+  // RECOMMEND coverage ①: util 50 < hard 92, single slow bucket whose GENUINE
+  // burn-to-full (uncapped by reset) is ≫ horizon. selectFinishingBucket returns
+  // 'soft' (genuine burn-to-full ≥ horizon), and phasePre only emits below the
+  // hard line when level === 'strong' — so soft + below-hard → null (静默).
+  const dir = tempDir();
+  try {
+    const raw = {
+      five_hour: { utilization: 50, resets_at: new Date((NOW + 86400) * 1000).toISOString() },
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('claude', { fetched_at: NOW, raw, cap_util: 50 }), true);
+      writeFileSync(join(dir, 'burn_claude.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          five_hour: {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              // (100-50)/2*3600 = 90000s = 25h ≫ 1800s horizon (genuine, and the
+              // 24h reset does not truncate it below the horizon either).
+              rate_pct_per_hour: 2,
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600,
+            },
+          },
+        },
+      }));
+      return phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    assert.equal(result, null, 'below-hard soft finish (genuine slow burn) must stay silent');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: codex early finishing (util<hard + strong) → systemMessage with 距打满, no permissionDecision', async () => {
+  // RECOMMEND coverage ②: codex side, below the hard line but a fast bucket pushes
+  // selectFinishingBucket to 'strong' (genuine burn-to-full < horizon). phasePre
+  // must surface a codex systemMessage that names the finishing window and shows
+  // 距打满, with NO permissionDecision / additionalContext (codex uses systemMessage).
+  //
+  // Codex fixtures are stateless (no burn enrichment), so drive the cache+burn-state
+  // path: write a codex-shaped cache raw + burn_codex.json. The bucket id is the
+  // codex-resolved name (rate_limit.primary_window).
+  const dir = tempDir();
+  try {
+    const raw = {
+      rate_limit: {
+        primary_window: {
+          used_percent: 70,
+          reset_at: NOW + 7200,
+          limit_window_seconds: 18000,
+          reset_after_seconds: 7200,
+        },
+      },
+      additional_rate_limits: [],
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('codex', { fetched_at: NOW, raw, cap_util: 70 }), true);
+      writeFileSync(join(dir, 'burn_codex.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          'rate_limit.primary_window': {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 180, // (100-70)/180*3600 = 600s < 1800 horizon
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600,
+            },
+          },
+        },
+      }));
+      return phasePre('codex', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    // codex output channel is systemMessage — never permissionDecision/additionalContext.
+    assert.equal(result?.hookSpecificOutput, undefined);
+    const msg = result?.systemMessage || '';
+    assert.match(msg, /额度 70%\(硬线 92%\)/);
+    assert.match(msg, /距打满 约 10 分钟/);
+    assert.match(msg, /低于收尾窗口 约 30 分钟/);
+    // the finishing clause names the codex-resolved window id + its util.
+    assert.match(msg, /窗口 rate_limit\.primary_window\(70%\)按当前消耗速度预计距打满 约 10 分钟/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: hard-line slow burn uses soft finishing reminder without denial', async () => {
+  const dir = tempDir();
+  try {
+    const raw = {
+      five_hour: { utilization: 95, resets_at: new Date((NOW + 86400) * 1000).toISOString() },
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('claude', { fetched_at: NOW, raw, cap_util: 95 }), true);
+      writeFileSync(join(dir, 'burn_claude.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          five_hour: {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 1,
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600,
+            },
+          },
+        },
+      }));
+      return phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    const msg = result?.hookSpecificOutput?.additionalContext || '';
+    assert.match(msg, /高于收尾窗口/);
+    assert.doesNotMatch(msg, /低于收尾窗口/);
+    assert.match(msg, /不会强制拦截/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: active manual skip suppresses the util<hard early finishing reminder', async () => {
+  // Same fast-burn fixture as the "below horizon triggers finishing reminder"
+  // case (util 80 < hard 92, rate 120 → genuine burn-to-full 600s < horizon →
+  // strong). An active hard-line skip authorization must silence even the early
+  // (below-hard) finishing line: skipRemaining>0 short-circuits phasePre to null.
+  const dir = tempDir();
+  try {
+    const raw = {
+      five_hour: { utilization: 80, resets_at: new Date((NOW + 7200) * 1000).toISOString() },
+    };
+    const env = {
+      BUDGET_STATE_DIR: dir,
+      BUDGET_CACHE_TTL: '300',
+      BUDGET_CWD_OVERRIDE: dir,
+      BUDGET_NOW_EPOCH: String(NOW + 5),
+      BUDGET_FINISHING_HORIZON: '1800',
+      BUDGET_SKIP_TTL: '1800',
+      BUDGET_USAGE_FIXTURE: undefined,
+      BUDGET_NO_TOKEN_DISCOVERY: '1',
+    };
+    const result = await withEnvAsync(env, async () => {
+      assert.equal(writeCache('claude', { fetched_at: NOW, raw, cap_util: 80 }), true);
+      writeFileSync(join(dir, 'burn_claude.json'), JSON.stringify({
+        version: 1,
+        buckets: {
+          five_hour: {
+            kind: 'short',
+            samples: [],
+            ewma: {
+              rate_pct_per_hour: 120,
+              updated_at: NOW,
+              valid_samples: 6,
+              first_valid_ts: NOW - 3600,
+            },
+          },
+        },
+      }));
+      // Arm a real hard-line skip via the override phrase (same code path the
+      // user takes), scoped to this cwd/state dir.
+      const armed = await hook.phasePrompt('claude', { prompt: '/budget-skip' }, TH);
+      assert.ok(armed?.hookSpecificOutput?.additionalContext?.includes('硬线手动跳过'));
+      return phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH);
+    });
+
+    assert.equal(result, null, 'active skip must silence the early finishing reminder');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -640,9 +1235,24 @@ test('phaseStop: non-resettable warn_util>=hard → force stop (continue:false),
     const fx = makeNonResettableFixture(dir, 95); // util=0, warn_util=95
     const result = await withEnvAsync(
       { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: fx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
-      () => phaseStop('claude', {}, TH),
+      () => phaseStop('claude', { session_id: 's-hard' }, TH),
     );
     assert.ok(result && result.continue === false, 'warn_util=95 >= hard=92 must force-stop even when hard_max(util)=0');
+    const pendingFiles = readdirSync(join(dir, 'pending')).filter((f) => /^claude_.*\.json$/.test(f));
+    assert.equal(pendingFiles.length, 1, 'scoped pending file written');
+    assert.ok(existsSync(join(dir, 'pending_claude.json')), 'legacy pending file written');
+    const scoped = JSON.parse(readFileSync(join(dir, 'pending', pendingFiles[0]), 'utf8'));
+    const legacy = JSON.parse(readFileSync(join(dir, 'pending_claude.json'), 'utf8'));
+    for (const pending of [scoped, legacy]) {
+      assert.equal(pending.status, 'paused');
+      assert.equal(pending.agent, 'claude');
+      assert.equal(pending.session_id, 's-hard');
+      assert.equal(pending.cwd, dir);
+      assert.equal(pending.reset_epoch, 0);
+      assert.equal(pending.util, 95);
+      assert.equal(pending.warn_util, 95);
+      assert.equal(typeof pending.at, 'number');
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

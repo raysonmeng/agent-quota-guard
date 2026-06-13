@@ -5,7 +5,7 @@
 #   agent : claude | codex
 #   phase : prompt | pre | post | stop | resume
 #           prompt  = UserPromptSubmit  (检测 /goal /loop /batch,给规划预估)
-#           pre     = PreToolUse        (硬线拦新工作,放行写 checkpoint)
+#           pre     = PreToolUse        (硬线减速提醒,放行写 checkpoint)
 #           post    = PostToolUse       (记录消耗速率,软线提示收尾)
 #           stop    = Stop / SubagentStop (循环轮末:重估,硬线强制停在干净点)
 #           resume  = SessionStart      (注入上次 checkpoint,续接)
@@ -318,14 +318,17 @@ ${body}"
   exit 0
 fi
 
-# ───────── pre:硬线拦新工作,放行写 checkpoint ─────────
+# ───────── pre:硬线减速提醒,放行写 checkpoint ─────────
 if [[ "$PHASE" == "pre" ]]; then
   if (( UTIL >= HARD )); then
-    pause_codex_goal_if_possible
     if is_checkpoint_write; then exit 0; fi
     if [[ "$(skip_remaining)" != "0" ]]; then exit 0; fi   # 手动跳过有效 → 静默放行
-    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。停止新工作:1) 把进度写入 ${CHECKPOINT}(写文件不拦);2) 用文字告诉我续接点;3) 不要再跑命令或换工具绕。刷新后(约 $(fmt_clock "$RESET"))发「继续」即可接上。"
-    jq -n --arg x "$r" '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny", permissionDecisionReason:$x}}'
+    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。请尽快把进度写进 ${CHECKPOINT} 并收尾到干净点;不会强制拦截新工具,但接近供应商限流时可能被外层硬切。刷新约 $(fmt_clock "$RESET")。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$r" '{hookSpecificOutput:{hookEventName:"PreToolUse", additionalContext:$c}}'
+    else
+      jq -n --arg m "$r" '{systemMessage:$m}'
+    fi
   fi
   exit 0
 fi
@@ -370,9 +373,12 @@ if [[ "$PHASE" == "stop" ]]; then
     pending_dir="$STATE_DIR/pending"
     mkdir -p "$pending_dir" 2>/dev/null || true
     key=$(printf '%s\n%s\n' "$(pwd -P 2>/dev/null || pwd)" "$sid" | cksum | awk '{print $1}')
-    jq -n --arg sid "$sid" --arg cwd "$(pwd)" --arg reset "$RESET" --arg util "$UTIL" \
-      '{status:"paused", agent:env.AGENT, session_id:$sid, cwd:$cwd, reset:($reset|tonumber? // 0), util:($util|tonumber), at:(now|floor)}' \
-      > "$pending_dir/${AGENT}_${key}.json" 2>/dev/null || true
+    pending_payload=$(jq -n --arg agent "$AGENT" --arg sid "$sid" --arg cwd "$(pwd)" --arg reset "$RESET" --arg util "$UTIL" \
+      '{status:"paused", agent:$agent, session_id:$sid, cwd:$cwd, reset_epoch:($reset|tonumber? // 0), util:($util|tonumber), warn_util:($util|tonumber), at:(now|floor)}' 2>/dev/null || true)
+    if [[ -n "$pending_payload" ]]; then
+      printf '%s\n' "$pending_payload" > "$pending_dir/${AGENT}_${key}.json" 2>/dev/null || true
+      printf '%s\n' "$pending_payload" > "$STATE_DIR/pending_${AGENT}.json" 2>/dev/null || true
+    fi
     stop="额度达硬线(${UTIL}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY"),已在本轮末尾干净停下并保存续接点。额度刷新约 $(fmt_clock "$RESET");之后发「继续」或由 watchdog 自动续跑。"
     jq -n --arg s "$stop" '{continue:false, stopReason:$s}'
   elif (( UTIL >= WARN_REPEAT )); then

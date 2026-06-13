@@ -224,7 +224,7 @@ read -r -d '' RULES <<'BLOCK' || true
 - 平时无感,不要主动提额度。只在收到带「额度已用 X%」的提示时才理会。
 - T1 提醒(约 80%):本窗口提醒一次,确认目标能收束。
 - T2 提醒(约 90%):每次提醒时都收尾当前步,把进度写进 .agent/checkpoint.md。
-- T3 硬线(约 92%,deny 或循环被停):立即停。不重试、不绕路。只做:① 写 .agent/checkpoint.md;② 若环境已配置 budget-guard MCP,调用 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
+- T3 硬线(约 92%,减速提醒或循环轮末被停):收到提醒就写 .agent/checkpoint.md 收尾;轮末停下后不重试、不绕路。只做:① 确认 checkpoint 已写;② 若环境已配置 budget-guard MCP,调用 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
 - 开始 /goal /loop /batch 等长任务时会先收到额度预估(还能跑多久、何时刷新)。据此把目标切成 checkpoint 化小块,先做最关键的部分。
 - 新会话带「续接」提示时,从 checkpoint 的「下一步」继续,跳过「已完成」。
 
