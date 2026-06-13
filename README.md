@@ -1,232 +1,422 @@
-# Token Budget Guard —— Claude Code / Codex 额度守卫
+# Agent Quota Guard
 
-让 Claude Code 和 Codex 在跑长任务时实时感知自己的订阅额度,接近上限时**干净地暂停并保存进度**,而不是执行到一半被硬切。刷新后发一句「继续」即可续上;可选的 watchdog 还能在额度恢复后自动续跑。
+**Language: English (default) · [中文](#中文文档)**
 
-CC 和 Codex **分开安装、互不依赖**——只用其中一个就只装一个。
+> Stop letting subscription rate-limits hard-cut your coding agent mid-task.
+> Agent Quota Guard watches your **Claude Code / Codex** subscription usage in real time, **pauses cleanly at a checkpoint** when you approach the cap, and helps you **resume after the quota refreshes** — instead of losing progress to a mid-execution interruption.
 
----
-
-## 1. 解决的问题
-
-长任务(尤其 `/goal` `/loop` `/batch` 这类自主循环)经常在跑到一半时撞上 5 小时 / 周限额,然后被粗暴中断:进度丢失、上下文断裂、要从头理。
-
-本项目把「中断」从**随机的破坏性硬切**变成**可预测的干净暂停**:
-
-- 平时无感,不打扰。
-- 长任务启动时先估「按现在的额度够跑多久」,提醒你切块。
-- 执行中实时重估,接近上限时在**轮末**停下、写好 checkpoint。
-- 续接靠一句「继续」,或交给 watchdog 自动托管。
+```bash
+npx agent-quota-guard claude    # install for Claude Code
+npx agent-quota-guard codex     # install for Codex
+```
 
 ---
 
-## 2. 核心理念
+## Why this exists
 
-- **静默优先**:`util < 软线` 时一个字都不冒。唯一例外是长任务启动时的预估。
-- **两段式阈值**:软线(默认 78%)提示收尾;硬线(默认 88%,留 ~12% 安全垫)在轮末强制停。
-- **checkpoint 闭环**:预警 → 收尾 → 落盘 → 续接,跨额度窗口接力。
-- **burn-rate 实时预测**:用最近的消耗速率外推撞线时间,而不是只看当前百分比。
-- **fail-open**:查不到额度(网络 / token / 字段对不上)一律放行,绝不因为守卫自身的问题卡死 agent。
-- **诚实边界**:这套**不能绕过限额**(见 §8)。它只能提前停在干净点 + 帮你续接。
+Long, autonomous runs (`/goal`, `/loop`, `/batch`, background agents) routinely slam into a 5-hour or weekly subscription limit **halfway through a step**. The result is the worst kind of interruption: work lost, context broken, and you restart from scratch.
+
+Agent Quota Guard turns that **random, destructive cut** into a **predictable, clean pause**:
+
+- **Silent by default** — it says nothing while you have plenty of quota.
+- **Plans ahead** — when you kick off a long task, it estimates how long your current quota will last and suggests chunking.
+- **Pauses at the round boundary** — as you approach the limit, it stops at a clean point and writes a checkpoint, never in the middle of a tool call.
+- **Helps you resume** — it can block in-place until the quota refreshes (interactive), or an optional watchdog can pick the task back up unattended.
+
+> **Honest scope:** this **cannot bypass your limit** — when the API quota is exhausted, it's exhausted. What it guarantees is that you stop at a *clean* point *before* exhaustion, with a checkpoint, so the interruption never lands mid-execution. See [Honest limits](#supported-agents--honest-limits).
 
 ---
 
-## 3. 架构:它怎么工作
+## What it does
 
-### 3.1 五个 hook 挂载点
+| | Behavior |
+|---|---|
+| 🔇 **Silent-first** | Below the warning threshold, it never interrupts you. The only proactive message is the planning estimate when you start a long task. |
+| 📊 **Three tiers** | **T1 (80%)** one heads-up per window · **T2 (90%)** wrap-up nudge every turn · **T3 (92%)** hard stop / park at the round boundary. |
+| 💾 **Checkpoint loop** | warn → wrap up → write checkpoint → resume across the quota window. |
+| 📈 **Burn-rate forecast** | extrapolates *time-to-limit* from your recent consumption rate, not just the current percentage. |
+| 🛟 **Fail-open** | if it can't read your usage (network / token / schema), it stays silent and lets the agent run — the guard never blocks you because of its own problem. |
+| 🎯 **Official numbers** | reads the same official usage endpoints as the claude.ai / Codex usage dashboards — no log scraping, no guessing. |
 
-守卫是一个脚本(`budget_guard.sh`),被挂在 CC / Codex 的五个生命周期事件上,靠第二个参数(phase)区分行为:
+---
 
-| 事件 | phase | 干什么 |
+## Install
+
+**Requirements:** `node >= 18`, `jq` (runtime), and `python3` (Codex install step only). Both agents install independently — install only the one you use.
+
+### Option A — npx (recommended, no clone)
+
+```bash
+npx agent-quota-guard claude              # → ~/.claude
+npx agent-quota-guard codex               # → ~/.codex
+npx agent-quota-guard claude --uninstall  # remove
+```
+
+A zero-dependency launcher: `claude` runs the Node installer, `codex` runs the bundled shell installer. Installs are idempotent and back up any file they touch (`.bak`).
+
+### Option B — clone the repo
+
+```bash
+git clone https://github.com/raysonmeng/agent-quota-guard.git
+cd agent-quota-guard
+
+./install.sh              # both agents in one go (Claude Code + Codex)
+./install.sh claude       # just Claude Code
+./install.sh codex        # just Codex
+./install.sh --uninstall  # remove both
+```
+
+The root `install.sh` is a thin wrapper that runs both per-agent installers in sequence (each is idempotent and backs up files before changing them); one agent failing doesn't block the other.
+
+**What the installer changes**
+
+- **Claude Code** — merges a hook into `~/.claude/settings.json` (your existing hooks are preserved) and writes a short "quota guard protocol" block into `~/.claude/CLAUDE.md`, wrapped in removable `<!-- budget-guard:start -->` / `<!-- budget-guard:end -->` markers so it can be cleanly stripped.
+- **Codex** — adds hooks to `~/.codex/config.toml` `[hooks]`, registers a `budget-guard` MCP server, and writes the protocol into `~/.codex/AGENTS.md`.
+
+Re-open your agent session afterwards; `/hooks` should list `budget_guard`.
+
+---
+
+## How you'll use it
+
+After install, **you don't run anything** — the guard rides along with your normal agent sessions:
+
+1. **Start a long task** (e.g. `/goal "refactor the payment module"`). The guard prints a one-time estimate of how far your current quota will carry it.
+2. **Work normally.** It stays quiet until ~80% usage.
+3. **Near the cap** it nudges you to wrap up, then at the hard line it **stops at the end of the current round** and writes a checkpoint (default `.agent/checkpoint.md` in your project).
+4. **Resume.** Either:
+   - **Interactive (Claude & Codex):** the agent can call the `wait_until_budget_refresh` MCP tool to park in place and continue the same turn once the window refreshes; or
+   - you simply send "continue" in a new session — the guard injects the checkpoint context so you don't lose your place; or
+   - **Unattended:** arm the [watchdog](#auto-resume-watchdog) to resume the task automatically after the quota refreshes.
+
+### Need just a little more? (manual hard-line skip)
+
+Sometimes you're a few steps from done and would rather push through than stop and resume. You can **explicitly** authorize the guard to stop enforcing the hard line for a while. In your prompt, include one of these phrases:
+
+- `/budget-skip` · `force-continue` · `跳过硬线` · `强制继续`
+
+This records a **time-boxed** (default 30 min, `BUDGET_SKIP_TTL`), **per-project** grant: while it's valid the hard line won't deny tools or force a round-end stop. It auto-expires and the guard then re-enforces normally. A plain "continue" never triggers it — the phrase must be explicit. This only delays a *clean* stop; it **cannot** create quota — once the API refuses requests, nothing keeps the agent running.
+
+---
+
+## Configuration
+
+All settings are environment variables with sane defaults — you usually don't need to touch them.
+
+| Variable | Default | Meaning |
 |---|---|---|
-| `UserPromptSubmit` | `prompt` | 检测 `/goal` `/loop` `/batch` `/background`,给一段规划预估(**唯一**额度充足也会提示的情形) |
-| `PreToolUse` | `pre` | 硬线时拦住新「干活」工具,但放行写 checkpoint |
-| `PostToolUse` | `post` | 记录一条消耗速率历史点;软线时提示收尾 |
-| `Stop` / SubagentStop | `stop` | `/goal` 循环的轮末:重估;硬线时 `continue:false` 强停在干净点,并写待续状态给 watchdog |
-| `SessionStart` | `resume` | 若有上次 checkpoint,注入到上下文,实现续接 |
+| `BUDGET_WARN_ONCE` | `80` | T1 — warn once per quota window |
+| `BUDGET_WARN_REPEAT` | `90` | T2 — wrap-up nudge every turn |
+| `BUDGET_HARD` | `92` | T3 — hard stop / park at the round boundary |
+| `BUDGET_SKIP_TTL` | `1800` | seconds a [manual hard-line skip](#need-just-a-little-more-manual-hard-line-skip) stays active |
+| `BUDGET_CACHE_TTL` | `45` | seconds to cache the usage lookup |
+| `BUDGET_CHECKPOINT` | `.agent/checkpoint.md` | checkpoint path (relative to project root) |
+| `BUDGET_STATE_DIR` | `~/.budget-guard` | cache / history / pending-resume state |
+| `BUDGET_MCP_TOOL_TIMEOUT_SEC` | `700000` | Codex MCP tool timeout (must exceed worst-case refresh wait) |
 
-`/goal` 是 Anthropic 官方命令,本身就由 Stop hook 驱动 continuation——所以挂在 `Stop` 上正好卡在「要不要再来一轮」的决策点,比 PreToolUse 精准。
+Full list, including watchdog and endpoint overrides, lives in the source and the [technical design doc](docs/budget-guard-tech-design.html).
 
-### 3.2 额度数据来源
+### Config files (global + per-project)
 
-不读日志、不估算,直接查官方 usage 端点(和 claude.ai / Codex 的用量面板同源):
+Instead of exporting env vars, you can put safe quota-tuning settings in two optional `KEY=value` files.
 
-**Claude Code**
+- **Global** — `~/.budget-guard/config` (your defaults for every project)
+- **Project** — `.budget-guard.conf` in your project root (found by walking up from the working dir; commit it to share with your team)
+
+```ini
+# ~/.budget-guard/config  or  ./.budget-guard.conf
+BUDGET_WARN_ONCE=75
+BUDGET_WARN_REPEAT=88
+BUDGET_HARD=90
 ```
-GET https://api.anthropic.com/api/oauth/usage
-  Authorization: Bearer <token>
-  anthropic-beta: oauth-2025-04-20
-```
-- token:macOS 在 Keychain(`Claude Code-credentials`),Linux/WSL 在 `~/.claude/.credentials.json` 的 `.claudeAiOauth.accessToken`。
-- 返回里取 `five_hour.utilization` 和 `seven_day.utilization` 的较大值(更保守)。利用率可能是 0–100 或 0–1,脚本会归一化到 0–100。
 
-**Codex**
-```
-GET <BUDGET_CODEX_URL>     # 默认猜测 https://chatgpt.com/backend-api/codex/usage
-  Authorization: Bearer <token>
-```
-- token:`~/.codex/auth.json`。
-- ⚠ 这个 URL 和返回字段名**待确认**(见 §9)。
+**Precedence (high → low):** environment variable **>** project config **>** global config **>** built-in default. Both files are optional; with neither present, behavior is exactly the built-in defaults.
 
-### 3.3 burn-rate 算法
-
-- 每次 `post` / `stop` 往 `~/.budget-guard/hist_<agent>.jsonl` 追加 `{ts, util}`(只保留最近 60 条)。
-- 估算时:在回看窗口(默认 15 分钟)内取最早点和最新点,两点法算速率 `rate = Δutil / Δt`(%/秒)。
-- 还能跑多久 `≈ (HARD - util_now) / rate`。`rate ≤ 0`(没在涨或在降)视为「充足」。
-- 每轮重算,所以预估会随实际消耗浮动——这就是「可能比预期早 / 晚用完」。
+For safety, config files only accept known safe tuning keys: `BUDGET_WARN_ONCE`, `BUDGET_WARN_REPEAT`, `BUDGET_SOFT`, `BUDGET_HARD`, `BUDGET_CACHE_TTL`, `BUDGET_HIST_WINDOW`, and `BUDGET_CLAUDE_UA`. Command, credential, endpoint, debug-fixture, dispatch, path, and automation keys such as `BUDGET_PROBE`, token variables, `BUDGET_CODEX_URL`, `BUDGET_USAGE_FIXTURE`, `BUDGET_AGENT`, `BUDGET_PHASE`, `BUDGET_STATE_DIR`, `BUDGET_CHECKPOINT`, `BUDGET_WATCHDOG_ARM`, `BUDGET_RESUME_BELOW`, `BUDGET_RESUME_PROMPT`, and `BUDGET_SKIP_TTL` (it governs how long the hard line can be skipped) must be set as explicit process environment variables.
 
 ---
 
-## 4. 目录结构
+## Supported agents & honest limits
 
-```
-token-budget-guard/
-├── README.md                 ← 本文件
-├── claude-budget-guard/      ← CC 包(整个目录可独立拿走)
-│   ├── install.sh            ← CC 安装器(配 hook + 写 CLAUDE.md + 部署脚本)
-│   ├── budget_guard.sh       ← 核心守卫(claude 模式)
-│   └── watchdog.sh           ← 可选:额度刷新后自动续跑
-└── codex-budget-guard/       ← Codex 包(整个目录可独立拿走)
-    ├── install.sh            ← Codex 安装器(配 hooks.json + 写 AGENTS.md + 部署脚本)
-    ├── budget_guard.sh       ← 同一份核心(codex 模式)
-    └── watchdog.sh           ← 同一份
-```
-
-`budget_guard.sh` 和 `watchdog.sh` 两个包共用同一份内容,靠运行时第一个参数(`claude` / `codex`)区分。安装器会把它们部署到 `~/.budget-guard/bin/`。
-
-运行期依赖 `jq`;安装时额外需要 `python3`(只在装的时候用,做 JSON 安全合并)。
-
----
-
-## 5. 安装
-
-### Claude Code
-```bash
-cd claude-budget-guard
-./install.sh
-```
-- 把 hook 幂等合并进 `~/.claude/settings.json`(不覆盖你已有的 hook,改动前自动 `.bak`)。
-- 把一段「额度守卫协议」写进 `~/.claude/CLAUDE.md`(带 `<!-- budget-guard -->` 标记,可干净移除)。
-- 重开会话后 `/hooks` 应能看到 `budget_guard`。
-- 卸载:`./install.sh --uninstall`
-
-### Codex
-```bash
-cd codex-budget-guard
-./install.sh
-```
-- 把 hook 合并进 `~/.codex/hooks.json`(顶层事件名结构),协议写进 `~/.codex/AGENTS.md`。
-- 重开会话 `/hooks` 验证。装完需确认 §9 的两个点。
-- 卸载:`./install.sh --uninstall`
-
-CC 侧基本开箱即用;Codex 侧装完要确认 usage URL 和 hooks.json 外层(§9)。
-
----
-
-## 6. 配置项(环境变量)
-
-| 变量 | 默认 | 说明 |
+| | Claude Code | Codex |
 |---|---|---|
-| `BUDGET_SOFT` | `78` | 软线:开始提示收尾 |
-| `BUDGET_HARD` | `88` | 硬线:轮末强制停 |
-| `BUDGET_CACHE_TTL` | `45` | 用量查询缓存秒数(PreToolUse 每次工具调用都会跑,必须缓存) |
-| `BUDGET_HIST_WINDOW` | `900` | burn-rate 回看窗口(秒) |
-| `BUDGET_CHECKPOINT` | `.agent/checkpoint.md` | checkpoint 路径(相对项目根,所以会落在各项目自己目录) |
-| `BUDGET_CODEX_URL` | `https://chatgpt.com/backend-api/codex/usage` | Codex usage 端点(待确认) |
-| `BUDGET_STATE_DIR` | `~/.budget-guard` | 缓存 / 历史 / 待续状态目录 |
+| Interactive (TUI) hooks | ✅ verified | ✅ verified |
+| Pause + checkpoint + resume | ✅ | ✅ (interactive) |
+| In-place park until refresh (MCP) | ✅ | ✅ (interactive) |
+| Headless / autonomous (`codex exec`) | ✅ (watchdog) | ⚠️ **lifecycle hooks do not fire** — guard is interactive-TUI only; headless relies on the watchdog (`codex exec resume`) |
 
-watchdog 专用变量见 §7。
+**What it cannot do:**
+
+- **It cannot bypass your limit.** Once the API refuses requests, no tool can keep the agent running. The guarantee is a clean stop *before* that, not infinite quota.
+- **Codex headless (`codex exec`, v0.135.0) does not fire lifecycle hooks**, so the in-session guard only works in the interactive TUI. Autonomous Codex runs are covered by the watchdog instead.
 
 ---
 
-## 7. 自动续跑 watchdog(可选 · 高级 · 有风险)
+## Auto-resume watchdog
 
-托管的最后一环:系统 cron / launchd 定时跑 `watchdog.sh`,发现额度已刷新且有未完成任务,就用 headless 模式注入「继续」自动续跑。
+*Optional · advanced · use with care.*
 
-**默认是 dry-run(只打印不执行)。** 确认权限白名单妥当后,才设 `BUDGET_WATCHDOG_ARM=1` 真正武装。
+A system `cron`/`launchd` job runs `watchdog.sh`; when it sees the quota has refreshed and a task is still pending, it resumes the task headlessly.
 
 ```bash
-# 每 10 分钟检查一次(武装后)
+# every 10 minutes, once armed
 */10 * * * * BUDGET_WATCHDOG_ARM=1 ~/.budget-guard/bin/watchdog.sh claude >> ~/.budget-guard/watchdog.log 2>&1
 ```
 
-续跑命令:
-- CC:`claude --resume <sid> -p "继续…" --permission-mode acceptEdits --allowedTools … --max-turns N --output-format json`
-- Codex:`codex exec resume <sid> "继续…" --full-auto`(或 `resume --last`)
+- **Default is dry-run** (`BUDGET_WATCHDOG_ARM=0`) — it prints what it *would* do. Only set `ARM=1` after you've reviewed the tool allowlist.
+- It runs an agent **unattended**, so it is locked down by default (`--allowedTools` / `--sandbox workspace-write` / `--max-turns`, scoped to the project dir). Keep those guards.
+- Resuming **consumes quota** immediately after refresh, and your machine must stay on.
 
-watchdog 变量:
+---
 
-| 变量 | 默认 | 说明 |
+## Project status
+
+Active development. Current state:
+
+- **Core** — Node implementation (usage probe, three-tier guard, blocking-MCP continuation) plus a Bash fallback. ✅
+- **Installers** — hardened through extensive cross-review against real-world configs (idempotency, byte-perfect uninstall, no user-config corruption). ✅
+- **Distribution** — `npx agent-quota-guard …` ready; **not yet published to npm** (publish pending).
+- **Tests** — 112 (core) + 38 (Codex MCP/installer) passing.
+- **Verified on real machines** — Claude Code full loop (hooks, checkpoint, hard-stop, resume, watchdog) via tmux E2E; Codex interactive TUI; live usage endpoints for both. Codex headless hook-firing is a documented limitation, not a bug.
+
+---
+
+## Roadmap
+
+- **Plugin packaging** — ship as a Claude Code / Codex plugin for one-command install + version management (and a `/budget` command to check the estimate on demand).
+- **Notifications** — push / email on pause, auto-resume, and completion.
+- **Context-window awareness** — also watch `/context` usage so long tasks don't blow the context limit, as a second constraint alongside quota.
+- **Steadier burn-rate** — switch the two-point rate estimate to a windowed linear regression to smooth out jitter.
+- **Per-project history** — split burn-rate history by session / project path so concurrent projects don't mix.
+- **Stronger completion detection** — replace the `DONE`-string heuristic the watchdog uses with a structured status field.
+
+---
+
+## Uninstall
+
+```bash
+npx agent-quota-guard claude --uninstall
+npx agent-quota-guard codex  --uninstall
+# or, from a clone: ./install.sh --uninstall
+```
+
+Removes the hooks, the MCP registration, and the protocol block — leaving the rest of your config untouched. The deployed scripts under `~/.budget-guard/` are left in place.
+
+---
+
+## License
+
+[MIT](LICENSE) © raysonmeng
+
+---
+---
+
+# 中文文档
+
+**语言:[English](#agent-quota-guard)(默认) · 中文**
+
+> 别再让订阅限流在任务跑到一半时硬切你的编程 agent。
+> Agent Quota Guard 实时监控你 **Claude Code / Codex** 的订阅用量,接近上限时**在干净点暂停并写好 checkpoint**,额度刷新后**帮你接着跑** —— 而不是执行中途被打断、进度丢失。
+
+```bash
+npx agent-quota-guard claude    # 装到 Claude Code
+npx agent-quota-guard codex     # 装到 Codex
+```
+
+---
+
+## 为什么需要它
+
+长任务、自主循环(`/goal`、`/loop`、`/batch`、后台 agent)经常**跑到一半**就撞上 5 小时 / 每周订阅限额。结果是最糟的那种中断:工作丢失、上下文断裂,只能从头再来。
+
+它把这种**随机的破坏性硬切**变成**可预测的干净暂停**:
+
+- **默认静默** —— 额度充足时一个字都不冒。
+- **提前规划** —— 启动长任务时,先估「按现在的额度够跑多久」,提醒你切块。
+- **轮末暂停** —— 接近上限时停在干净点并写 checkpoint,绝不停在某次工具调用中途。
+- **帮你续接** —— 可原地阻塞等到额度刷新再继续(交互场景),或由可选的 watchdog 无人值守自动接着跑。
+
+> **诚实边界:** 它**不能绕过限额** —— API 额度耗尽就是耗尽。它保证的是在耗尽**之前**停在*干净点* + checkpoint,让中断不再落在执行中途。详见[支持范围与诚实边界](#支持范围与诚实边界)。
+
+---
+
+## 它做什么
+
+| | 行为 |
+|---|---|
+| 🔇 **静默优先** | 低于提醒线时绝不打扰。唯一主动发声是启动长任务时的规划预估。 |
+| 📊 **三档阈值** | **T1(80%)** 本窗口提醒一次 · **T2(90%)** 每轮提示收尾 · **T3(92%)** 轮末强制停 / park。 |
+| 💾 **checkpoint 闭环** | 预警 → 收尾 → 落盘 → 跨额度窗口续接。 |
+| 📈 **burn-rate 预测** | 用最近消耗速率外推「还能跑多久」,不只看当前百分比。 |
+| 🛟 **fail-open** | 查不到用量(网络 / token / 字段对不上)就静默放行 —— 绝不因守卫自身问题卡死 agent。 |
+| 🎯 **官方数据** | 直接查官方 usage 端点(和 claude.ai / Codex 用量面板同源),不读日志、不估算。 |
+
+---
+
+## 安装
+
+**前置:** `node >= 18`、`jq`(运行期)、`python3`(仅 Codex 安装时用)。两个 agent 互不依赖,用哪个装哪个。
+
+### 方式 A —— npx(推荐,无需 clone)
+
+```bash
+npx agent-quota-guard claude              # → ~/.claude
+npx agent-quota-guard codex               # → ~/.codex
+npx agent-quota-guard claude --uninstall  # 卸载
+```
+
+零依赖的薄启动器:`claude` 走 Node 安装器、`codex` 走随包 bash 安装器。安装幂等,改动任何文件前自动 `.bak`。
+
+### 方式 B —— clone 仓库
+
+```bash
+git clone https://github.com/raysonmeng/agent-quota-guard.git
+cd agent-quota-guard
+
+./install.sh              # 一键装两个(Claude Code + Codex)
+./install.sh claude       # 只装 Claude Code
+./install.sh codex        # 只装 Codex
+./install.sh --uninstall  # 卸载两个
+```
+
+根目录 `install.sh` 是薄包装:依次调用两个子安装器(各自幂等、改前自动 `.bak`);一个 agent 失败不阻断另一个。
+
+**安装器会改什么**
+
+- **Claude Code** —— 把 hook 幂等合并进 `~/.claude/settings.json`(保留你已有的 hook),并在 `~/.claude/CLAUDE.md` 写入一段带可移除标记的「额度守卫协议」。
+- **Codex** —— 把 hook 加进 `~/.codex/config.toml` 的 `[hooks]`,注册 `budget-guard` MCP server,协议写进 `~/.codex/AGENTS.md`。
+
+装完重开会话,`/hooks` 应能看到 `budget_guard`。
+
+---
+
+## 怎么用
+
+装完**你什么都不用跑** —— 守卫随你正常的会话自动生效:
+
+1. **启动长任务**(如 `/goal "重构支付模块"`)。守卫打印一次预估:按现在的额度大概能跑多远。
+2. **正常干活。** 用量到 ~80% 前它保持安静。
+3. **接近上限**时提示你收尾,到硬线时**在当前轮末停下**并写 checkpoint(默认项目里的 `.agent/checkpoint.md`)。
+4. **续接**,任选:
+   - **交互(Claude & Codex):** agent 可调用 `wait_until_budget_refresh` MCP 工具,原地 park 到窗口刷新后**同一轮继续**;或
+   - 你在新会话里发一句「继续」 —— 守卫注入 checkpoint 上下文,不丢进度;或
+   - **无人值守:** 武装 [watchdog](#自动续跑-watchdog),额度刷新后自动接着跑。
+
+### 就差一点点?(手动跳过硬线)
+
+有时你离收尾只差几步,与其停下来再续接,不如一口气干完。你可以**显式**授权守卫暂时不再强制硬线 —— 在 prompt 里带上下面任一短语即可:
+
+- `/budget-skip` · `force-continue` · `跳过硬线` · `强制继续`
+
+这会记录一个**限时**(默认 30 分钟,由 `BUDGET_SKIP_TTL` 控制)、**按项目作用域**的授权:有效期内硬线不再拦工具、也不在轮末强停;到期自动恢复正常拦截。普通的「继续」**不会**触发 —— 短语必须显式。它只是延后一次*干净*的停止,**并不能**凭空变出额度 —— API 一旦拒绝请求,谁也没法让 agent 继续跑。
+
+---
+
+## 配置项
+
+全是带默认值的环境变量,通常不用动。
+
+| 变量 | 默认 | 含义 |
 |---|---|---|
-| `BUDGET_WATCHDOG_ARM` | `0` | `1` 才真正执行续跑,否则只 dry-run |
-| `BUDGET_RESUME_BELOW` | `30` | 用量回落到此线下才认为窗口已刷新 |
-| `BUDGET_RESUME_PROMPT` | (见脚本) | 续跑时注入的「继续」指令 |
-| `BUDGET_CLAUDE_ALLOWED` | `Read,Edit,Write,Bash` | CC 续跑的工具白名单(**按需收紧**) |
-| `BUDGET_CLAUDE_PERMMODE` | `acceptEdits` | CC 续跑权限模式 |
-| `BUDGET_CLAUDE_MAXTURNS` | `40` | CC 续跑最大轮数 |
+| `BUDGET_WARN_ONCE` | `80` | T1 —— 本额度窗口提醒一次 |
+| `BUDGET_WARN_REPEAT` | `90` | T2 —— 每轮提示收尾 |
+| `BUDGET_HARD` | `92` | T3 —— 轮末强制停 / park |
+| `BUDGET_SKIP_TTL` | `1800` | [手动跳过硬线](#就差一点点手动跳过硬线)的有效秒数 |
+| `BUDGET_CACHE_TTL` | `45` | 用量查询缓存秒数 |
+| `BUDGET_CHECKPOINT` | `.agent/checkpoint.md` | checkpoint 路径(相对项目根) |
+| `BUDGET_STATE_DIR` | `~/.budget-guard` | 缓存 / 历史 / 待续状态目录 |
+| `BUDGET_MCP_TOOL_TIMEOUT_SEC` | `700000` | Codex MCP 工具超时(须大于最坏刷新等待) |
 
-⚠ 风险见 §8.2。
+完整清单(含 watchdog、端点覆盖)见源码与[技术方案文档](docs/budget-guard-tech-design.html)。
 
----
+### 配置文件(全局 + 项目两层)
 
-## 8. 诚实边界(务必先读)
+除了设环境变量,也可以把安全的额度调参项写进两个可选的 `KEY=value` 文件:
 
-### 8.1 不能绕过限额
-额度耗尽后 API 会拒绝请求,**没有任何工具能让 agent「用完了还继续跑」**。本项目能保证的只是:在耗尽**之前**停在干净的轮末 + checkpoint,使中断不再发生在执行中途。这是「绝对杜绝中断」能达成的版本。
+- **全局** —— `~/.budget-guard/config`(你对所有项目的默认)
+- **项目** —— 项目根目录的 `.budget-guard.conf`(从工作目录向上查找;提交进 git 即可团队共享)
 
-### 8.2 watchdog 的代价
-- **无人值守跑 agent**:没人看着它改文件、跑命令。必须用 `--allowedTools` / `--full-auto`+sandbox / `--max-turns` 严格限权,并限定项目目录。
-- **续跑吃额度**:每次 resume 是完整会话,刷新后会立刻开始消耗——可能你还想留额度干别的。
-- **机器要开着**(除非改用 Anthropic 云端 Routines)。
+```ini
+# ~/.budget-guard/config  或  ./.budget-guard.conf
+BUDGET_WARN_ONCE=75
+BUDGET_WARN_REPEAT=88
+BUDGET_HARD=90
+```
 
----
+**优先级(高 → 低):** 环境变量 **>** 项目配置 **>** 全局配置 **>** 内置默认。两份文件都可选;都不存在时行为与内置默认完全一致。
 
-## 9. 待确认 / 待办 / 路线图(继续开发看这里)
-
-### 必须在真机确认
-- [ ] **Anthropic usage 端点的 reset 字段名**。脚本里 `resets_at` / `reset_at` 是按惯例猜的。判断方法:装完第一次摸到软线时,如果预估里「刷新时间」显示「未知」,就是字段名要改——抓一次 `api/oauth/usage` 的真实返回对一下 `fetch_usage()` 里的 jq。
-- [ ] **Codex usage 端点真实 URL + 返回字段名**。抓 `codex` 的 `/status` 包确认 host/path,用 `BUDGET_CODEX_URL` 覆盖;返回字段(`used_percent` 之类)照实改 `fetch_usage()` 的 codex 分支。
-- [ ] **Codex `hooks.json` 外层结构**。安装器按「顶层事件名」写;若你的 Codex 版本不认,把 `~/.codex/hooks.json` 包一层 `{"hooks": { … }}`。`/hooks` 验证。
-- [ ] **`/goal` 的 Stop hook 与官方 evaluator 的优先级**。我们用 `continue:false` 强停,但多个 Stop hook 与官方 goal evaluator 的交互没真机验证过,确认 `continue:false` 是否稳定压过 evaluator 让循环停。
-
-### 已知局限(值得修)
-- [ ] **多项目并发会互相覆盖**。待续状态 `pending_<agent>.json` 和历史 `hist_<agent>.jsonl` 都是按 agent 单文件——同时跑多个 CC 项目都撞线时,后写的覆盖先写的,watchdog 只会续最后一个;burn-rate 历史也会混。应改成按 `session_id` / 项目路径分文件。
-- [ ] **burn-rate 用两点法**,对抖动敏感。可换成窗口内线性回归,更稳。
-- [ ] **只看额度,没看 context window**。长任务也会撞 context 上限。可把 `/context` 占用纳入,做双约束。
-
-### 增强方向
-- [ ] **打包成 plugin**,一键分发 + 版本管理:
-  - CC:`.claude-plugin/plugin.json` + `hooks/hooks.json` + 可选 `commands/`(比如加一个 `/budget` 命令手动查预估)。`/plugin marketplace add <git>` → `/plugin install`。
-  - Codex:plugin manifest + 默认 `hooks/hooks.json`,走 Codex 的 marketplace 体系。
-- [ ] **接通知**:任务暂停 / 自动续跑 / 完成时 push 或邮件(CC 有 Notification hook 可用)。
-- [ ] **watchdog 完成判定**目前靠 checkpoint 里出现 `DONE` 字样,较弱;可改成结构化状态字段。
-- [ ] **CC 也可用 plugin 的 Notification / PreCompact** 等事件做更细的体验。
-
-### 测试状态
-- ✅ 已验证(容器内逻辑层):bash 语法、burn-rate 数学(15min 40%→70% 估到硬线 540s,精确)、`/goal /loop /batch` 命令检测正则、各 phase 的 JSON 输出格式、两个安装器的合并 / 幂等 / 卸载完整生命周期(用户已有 hook 不受损)。
-- ❌ 未验证(需真机 + 真 token):真实 usage 端点字段、hook 在真实 CC/Codex 会话里的触发、`/goal` Stop 交互、watchdog headless 续跑、Codex usage URL 是否正确。
+出于安全考虑,配置文件只接受明确安全的调参 key:`BUDGET_WARN_ONCE`、`BUDGET_WARN_REPEAT`、`BUDGET_SOFT`、`BUDGET_HARD`、`BUDGET_CACHE_TTL`、`BUDGET_HIST_WINDOW`、`BUDGET_CLAUDE_UA`。命令、凭据、端点、调试 fixture、调度身份、路径和自动化控制类 key,例如 `BUDGET_PROBE`、token 变量、`BUDGET_CODEX_URL`、`BUDGET_USAGE_FIXTURE`、`BUDGET_AGENT`、`BUDGET_PHASE`、`BUDGET_STATE_DIR`、`BUDGET_CHECKPOINT`、`BUDGET_WATCHDOG_ARM`、`BUDGET_RESUME_BELOW`、`BUDGET_RESUME_PROMPT`,以及 `BUDGET_SKIP_TTL`(它决定硬线能被跳过多久),仍需显式设置为进程环境变量。
 
 ---
 
-## 10. 速查
+## 支持范围与诚实边界
 
-**关键端点**
-- CC 用量:`GET https://api.anthropic.com/api/oauth/usage`(`anthropic-beta: oauth-2025-04-20`)
-- Codex 用量:`GET /api/codex/usage`(URL 待确认)
+| | Claude Code | Codex |
+|---|---|---|
+| 交互 TUI hook | ✅ 已验证 | ✅ 已验证 |
+| 暂停 + checkpoint + 续接 | ✅ | ✅(交互) |
+| 原地 park 到刷新(MCP) | ✅ | ✅(交互) |
+| Headless / 自主(`codex exec`) | ✅(watchdog) | ⚠️ **lifecycle hook 不触发** —— 守卫仅交互 TUI 生效;headless 靠 watchdog(`codex exec resume`) |
 
-**续跑命令**
-- `claude --resume <sid> -p "…" --permission-mode acceptEdits --output-format json`
-- `claude --continue "…"`
-- `codex exec resume <sid> "…" --full-auto` / `codex exec resume --last "…"`
+**它做不到的:**
 
-**CC / Codex 关键差异**
-- Codex 的 hook 只对 Bash 命令可靠触发,apply_patch / 多数 MCP 工具暂不触发(openai/codex#16732)——硬线主要拦命令,写 checkpoint(apply_patch)正好不被拦。
-- Codex `PreToolUse` 不支持 `additionalContext`;所以软提示 / 预估对 Codex 走 `systemMessage`(给用户看),对 CC 走 `additionalContext`(给 agent 读)。
-- CC 的 `/hooks` 能交互添加 command hook;Codex 的 `/hooks` 只能查看 + 开关,加 hook 得写文件。
-- Codex `goals` 模式下 `exec resume` 仍需注入一个「继续」prompt(promptless 未实现,openai/codex#24016)。
+- **不能绕过限额。** API 一旦拒绝请求,没有任何工具能让 agent 继续跑。它保证的是在那之前干净地停,不是无限额度。
+- **Codex headless(`codex exec`,v0.135.0)不触发 lifecycle hook**,所以会话内守卫只在交互 TUI 生效;Codex 的自主任务改由 watchdog 兜底。
 
-**Hook 输出协议(两边一致的要点)**
-- 阻断:`{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"…"}}`,且 `exit 0`。
-- 强停整轮:`{"continue":false,"stopReason":"…"}`。
-- 注入上下文(CC):`{"hookSpecificOutput":{"hookEventName":"<Event>","additionalContext":"…"}}`。
-- 给用户看的提示:`{"systemMessage":"…"}`。
-- 不要混用 `exit 2` 和 JSON——脚本统一走 `exit 0 + JSON`。
+---
+
+## 自动续跑 watchdog
+
+*可选 · 高级 · 谨慎用。*
+
+系统 `cron`/`launchd` 定时跑 `watchdog.sh`;发现额度已刷新且有未完成任务,就 headless 续跑。
+
+```bash
+# 武装后,每 10 分钟检查一次
+*/10 * * * * BUDGET_WATCHDOG_ARM=1 ~/.budget-guard/bin/watchdog.sh claude >> ~/.budget-guard/watchdog.log 2>&1
+```
+
+- **默认 dry-run**(`BUDGET_WATCHDOG_ARM=0`)—— 只打印不执行。确认工具白名单妥当后再设 `ARM=1`。
+- 它**无人值守**地跑 agent,所以默认严格限权(`--allowedTools` / `--sandbox workspace-write` / `--max-turns`,限定项目目录)。请保留这些限制。
+- 续跑会在刷新后**立即消耗额度**,且机器需保持开机。
+
+---
+
+## 项目进展
+
+活跃开发中。当前状态:
+
+- **核心** —— Node 实现(用量探针、三档守卫、阻塞 MCP 续接)+ Bash 兜底。✅
+- **安装器** —— 经大量交叉审针对真实配置加固(幂等、字节级完美卸载、不破坏用户已有配置)。✅
+- **分发** —— `npx agent-quota-guard …` 已就绪;**尚未发布到 npm**(待发布)。
+- **测试** —— 112(核心)+ 38(Codex MCP / 安装器)全通过。
+- **真机已验证** —— Claude Code 全闭环(hook、checkpoint、硬停、续接、watchdog)tmux E2E;Codex 交互 TUI;两端真实 usage 端点。Codex headless 不触发 hook 是已记录的限制,非 bug。
+
+---
+
+## 路线图
+
+- **打包成 plugin** —— 做成 Claude Code / Codex 插件,一键安装 + 版本管理(并加 `/budget` 命令随时查预估)。
+- **接通知** —— 暂停 / 自动续跑 / 完成时 push 或邮件。
+- **context window 感知** —— 同时监控 `/context` 占用,让长任务不撞 context 上限,与额度形成双约束。
+- **更稳的 burn-rate** —— 把两点法换成窗口内线性回归,抚平抖动。
+- **按项目分历史** —— burn-rate 历史按 session / 项目路径拆分,避免并发项目相互污染。
+- **更强的完成判定** —— 把 watchdog 现用的 `DONE` 字符串启发式换成结构化状态字段。
+
+---
+
+## 卸载
+
+```bash
+npx agent-quota-guard claude --uninstall
+npx agent-quota-guard codex  --uninstall
+# 或 clone 后:./install.sh --uninstall
+```
+
+移除 hook、MCP 注册、协议块,其余配置原样保留;部署到 `~/.budget-guard/` 的脚本会留下。
+
+---
+
+## 许可证
+
+[MIT](LICENSE) © raysonmeng

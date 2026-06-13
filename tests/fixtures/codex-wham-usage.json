@@ -1,0 +1,36 @@
+{
+  "rate_limit": {
+    "primary_window": {
+      "used_percent": 44,
+      "reset_at": 1760001800,
+      "limit_window_seconds": 18000,
+      "reset_after_seconds": 900
+    },
+    "secondary_window": {
+      "used_percent": 51,
+      "reset_at": 1760500000,
+      "limit_window_seconds": 604800,
+      "reset_after_seconds": 499100
+    }
+  },
+  "additional_rate_limits": [
+    {
+      "limit_name": "GPT-5.3-Codex-Spark",
+      "metered_feature": "model:gpt-5.3-codex-spark",
+      "rate_limit": {
+        "primary_window": {
+          "used_percent": 48,
+          "reset_at": 1760002000,
+          "limit_window_seconds": 18000,
+          "reset_after_seconds": 1100
+        },
+        "secondary_window": {
+          "used_percent": 93,
+          "reset_at": 1760500100,
+          "limit_window_seconds": 604800,
+          "reset_after_seconds": 499200
+        }
+      }
+    }
+  ]
+}

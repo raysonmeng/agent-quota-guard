@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>token-budget-guard · 最终技术方案</title>
+<style>
+  :root{
+    --bg:#0e1014; --panel:#161922; --panel2:#1c202b; --ink:#e7e9ef; --muted:#9aa3b2;
+    --line:#2a2f3a; --accent:#6ea8fe; --accent2:#a78bfa;
+    --red:#ff6b6b; --amber:#ffc14d; --green:#4ade80; --gray:#8b95a7; --blue:#5eb1ff; --teal:#2dd4bf;
+    --code:#0a0c10;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:1040px;margin:0 auto;padding:40px 24px 90px}
+  header{border-bottom:1px solid var(--line);padding-bottom:22px}
+  .eyebrow{color:var(--accent);font-weight:600;letter-spacing:.08em;font-size:12px;text-transform:uppercase}
+  h1{font-size:31px;margin:8px 0 6px;letter-spacing:-.01em}
+  .sub{color:var(--muted);font-size:14px}
+  .meta{margin-top:14px;display:flex;flex-wrap:wrap;gap:8px}
+  .chip{background:var(--panel2);border:1px solid var(--line);color:var(--muted);border-radius:999px;padding:3px 11px;font-size:12px}
+  h2{font-size:21px;margin:46px 0 4px;padding-top:12px;display:flex;align-items:center;gap:10px;border-top:1px solid var(--line)}
+  h2:first-of-type{border-top:none}
+  h2 .n{color:var(--accent2);font-variant-numeric:tabular-nums;font-size:14px;border:1px solid var(--line);background:var(--panel);border-radius:8px;padding:2px 9px}
+  h3{font-size:16px;margin:24px 0 6px;color:#cfd5e1}
+  h4{font-size:14px;margin:16px 0 4px;color:#b9c0cc}
+  p{margin:10px 0}
+  .lead{font-size:16px;color:#d9dde6}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  code{background:var(--code);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#d6deea}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:14px 16px;overflow:auto;font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:#cbd5e6}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin:14px 0}
+  .verdict{background:linear-gradient(180deg,#1a1f2b,#141821);border:1px solid #2c3446}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px}
+  th,td{text-align:left;padding:9px 11px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  tr:last-child td{border-bottom:none}
+  td code{font-size:12px}
+  .badge{display:inline-block;border-radius:6px;padding:1px 8px;font-size:11.5px;font-weight:700;white-space:nowrap}
+  .b-red{background:rgba(255,107,107,.15);color:var(--red);border:1px solid rgba(255,107,107,.3)}
+  .b-amber{background:rgba(255,193,77,.13);color:var(--amber);border:1px solid rgba(255,193,77,.3)}
+  .b-gray{background:rgba(139,149,167,.13);color:var(--gray);border:1px solid rgba(139,149,167,.3)}
+  .b-green{background:rgba(74,222,128,.13);color:var(--green);border:1px solid rgba(74,222,128,.3)}
+  .b-blue{background:rgba(94,177,255,.13);color:var(--blue);border:1px solid rgba(94,177,255,.3)}
+  .b-teal{background:rgba(45,212,191,.13);color:var(--teal);border:1px solid rgba(45,212,191,.3)}
+  ul,ol{margin:10px 0;padding-left:22px} li{margin:5px 0}
+  .grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+  @media(max-width:760px){.grid{grid-template-columns:1fr}}
+  .card{border-radius:12px;border:1px solid var(--line);padding:14px 16px;background:var(--panel2)}
+  .card h4{margin:0 0 4px;font-size:15px;color:#e7e9ef}
+  .toc{columns:2;column-gap:24px;font-size:13.5px}
+  @media(max-width:720px){.toc{columns:1}}
+  .toc a{display:block;color:var(--muted);padding:3px 0}.toc a:hover{color:var(--accent)}
+  .note{border-left:3px solid var(--accent);padding:8px 14px;background:var(--panel2);border-radius:0 8px 8px 0;margin:14px 0}
+  .warn{border-left-color:var(--amber)} .ok{border-left-color:var(--green)} .bad{border-left-color:var(--red)}
+  .foot{color:var(--muted);font-size:12.5px;margin-top:44px;border-top:1px solid var(--line);padding-top:18px}
+  .mono-sm{font:12px ui-monospace,Menlo,monospace;color:var(--muted)}
+  .flow{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:16px;font:12.5px/1.7 ui-monospace,Menlo,monospace;color:#cbd5e6;white-space:pre;overflow:auto}
+  .tag{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-left:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">最终技术方案 · 全程源码实证</div>
+  <h1>token-budget-guard 技术方案</h1>
+  <div class="sub">Claude Code / Codex 订阅额度守卫 —— 接近上限干净停下,刷新后自动续接,无人值守</div>
+  <div class="meta">
+    <span class="chip">Claude × Codex 交叉评审</span>
+    <span class="chip">claude-code v2.1.88 源码</span>
+    <span class="chip">codex-rs 源码</span>
+    <span class="chip">参考实现 CodexBar</span>
+    <span class="chip">状态:设计锁定 · 待开写</span>
+  </div>
+</header>
+
+<div class="panel verdict">
+  <p class="lead" style="margin-top:4px"><strong>核心结论:</strong>「睡前设个 Goal、无人值守、刷新后自动续」<strong>能做到</strong>,且最优形态不是外部注入,而是让 agent <strong>调用一个阻塞 MCP 工具原地 park 到额度刷新</strong>(C4)——同会话续、不重放上下文、park 期零 token、跨 Claude/Codex 通用。守卫负责在阈值处干净停,解析层照搬 CodexBar 的端点/schema 逻辑,doctor 自检防"静默失效"。</p>
+</div>
+
+<h2><span class="n">目录</span></h2>
+<div class="panel toc">
+  <a href="#status">0 · 实现状态 · 语言 B · 分工 · 测试方案</a>
+  <a href="#scene">1 · 目标场景 & 诚实边界</a>
+  <a href="#dream">2 · 「睡前设 Goal」最终答案</a>
+  <a href="#cont">3 · 续接架构 C4 / C1 / C3</a>
+  <a href="#c4">4 · C4 机制详解(阻塞 MCP 工具)</a>
+  <a href="#stop">5 · 强停机制</a>
+  <a href="#usage">6 · 取数层(Node 重写 · 照 CodexBar 逻辑)</a>
+  <a href="#tiers">7 · 三档守卫 + doctor</a>
+  <a href="#components">8 · 组件清单</a>
+  <a href="#bugs">9 · 现有代码的真实问题</a>
+  <a href="#evidence">10 · 源码实证速查(file:line)</a>
+  <a href="#test">11 · 测试 & tmux E2E</a>
+  <a href="#risks">12 · 待验证 / 风险</a>
+  <a href="#flow">13 · 落地流程</a>
+</div>
+
+<h2 id="status"><span class="n">0</span>实现状态 · 语言 B · 分工 · 测试方案</h2>
+
+<h3>语言决定:B = Node(ESM,混合态)</h3>
+<p>守卫核心从纯 bash 迁移到 <strong>Node 22+(纯 ESM)</strong>。原因:hook 不锁语言(<code>type:command</code> 跑任意可执行,已源码核实 <code>schemas/hooks.ts:33</code>);MCP server 必须 Node(官方 SDK);统一一种语言贯穿 probe / hook / MCP,且更贴 CodexBar 的健壮取数。bash 旧实现<strong>保留并存</strong>作 fallback。</p>
+<ul>
+  <li><strong>probe / hook / installer</strong>:纯 Node 内置模块,<strong>零外部依赖</strong>(<code>node:fs/https/crypto/...</code>)。</li>
+  <li><strong>MCP server</strong>:Node + <code>@modelcontextprotocol/sdk</code> + <code>zod</code>(唯一带 npm 依赖的组件;安装时需 <code>npm install</code>)。</li>
+  <li>hook 入口仍是 shell command,指向 <code>node ~/.budget-guard/bin/guard.mjs &lt;agent&gt; &lt;phase&gt;</code>。</li>
+</ul>
+
+<h3>实现状态(快照)</h3>
+<table>
+  <thead><tr><th>组件</th><th>状态</th><th>位置</th></tr></thead>
+  <tbody>
+    <tr><td>budget-probe(Node,取数+解析+缓存+429闸+doctor)</td><td><span class="badge b-green">已实现</span> Claude provider</td><td><code>lib/probe/</code> + <code>bin/probe.mjs</code></td></tr>
+    <tr><td>budget-guard hook(5 phase + 三档 + fingerprint + checkpoint)</td><td><span class="badge b-green">已实现</span></td><td><code>lib/guard/</code> + <code>bin/guard.mjs</code></td></tr>
+    <tr><td>claude installer(写 hook + CLAUDE.md 协议 + 使用方式)</td><td><span class="badge b-green">已实现</span></td><td><code>lib/installer/</code> + <code>bin/install-claude.mjs</code></td></tr>
+    <tr><td>budget-mcp server(check_budget / wait_until_budget_refresh)</td><td><span class="badge b-green">已实现</span></td><td><code>codex-budget-guard/mcp-server.mjs</code> + <code>mcp-tools.mjs</code></td></tr>
+    <tr><td>codex installer(hooks.json + MCP 注册 + tool_timeout_sec)</td><td><span class="badge b-green">已实现</span></td><td><code>codex-budget-guard/install.sh</code></td></tr>
+    <tr><td>watchdog(C3 兜底)+ bash 旧核心</td><td><span class="badge b-green">保留并存</span></td><td>两包 <code>*.sh</code></td></tr>
+    <tr><td>cross-review 真 bug 修复</td><td><span class="badge b-amber">进行中</span> P0 已修(symlink / T3-stop),P1/P2 修复+复审中</td><td>—</td></tr>
+    <tr><td>lib 单元测试 / 真机 tmux E2E</td><td><span class="badge b-amber">进行中</span></td><td><code>tests/</code> + codex <code>test/</code></td></tr>
+  </tbody>
+</table>
+
+<h3>分工(Claude × Codex)</h3>
+<table>
+  <thead><tr><th>归属</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Claude</strong></td><td>probe(Claude provider)、hook 5-phase、claude installer、P0/P1/P2 我侧 bug 修复、lib 单元测试、对 Codex 产出做交叉 review、HTML 文档。</td></tr>
+    <tr><td><strong>Codex</strong></td><td>budget-mcp server + tools、codex provider、codex installer(MCP 注册 + tool_timeout_sec)、C3 watchdog(codex exec resume)、codex <code>/goal</code> pause、对 Claude 产出做交叉 review、codex 侧真机/MCP 测试。</td></tr>
+    <tr><td><strong>共享</strong></td><td>归一化 probe 契约(冻结);限流参照 CodexBar(分钟级轮询 + 429 退避闸 + 共享缓存);两轮独立 subagent 交叉 review 才过 gate;开发期双方用 probe 自查 token 定节奏。</td></tr>
+  </tbody>
+</table>
+
+<h3>测试方案</h3>
+<ol>
+  <li><strong>fixture 单元测(无真 token)</strong>:<code>node --test tests/*.test.mjs</code> + codex <code>test/budget-mcp.test.mjs</code>。覆盖 normalizeUtil / isoToEpoch / checkThresholds / parseUsage 双 max / fingerprint once / checkpoint 精确放行(含 symlink 拒)/ 三档边界 / fail-open。用 <code>BUDGET_USAGE_FIXTURE</code> + <code>BUDGET_NOW_EPOCH</code> + 临时 <code>BUDGET_STATE_DIR</code> 隔离。</li>
+  <li><strong>集成</strong>:真 token 跑 <code>probe doctor</code>(claude <code>/api/oauth/usage</code>、codex <code>wham/usage</code>),验全 bucket + reset 解析 + 429 闸真机行为。</li>
+  <li><strong>tmux 真机 E2E</strong>:真 claude/codex 跑进 tmux pane,mock usage(<code>BUDGET_USAGE_FIXTURE</code>)驱动 80→90→95,验:T3 真停、C4 park→唤醒同 turn 续、C1 cron fire、C3 resume、codex <code>/goal</code> pause vs idle、<strong>codex tool_timeout_sec 高低对照</strong>(低值确认阻塞被砍=保护有效,高值确认 park 成功)。</li>
+  <li><strong>cross-review gate</strong>:每组件 2 个独立 subagent 正交审(类型/逻辑/测试 vs 集成/安全/边界),连续两轮 0 真 issue 才过;SUSPECT 主 agent 亲自实证。</li>
+</ol>
+
+<div class="note warn"><strong>开发期自调度(dogfooding):</strong>双方开发中直接用 <code>budget-probe</code> 查自己的 token 剩余量来规划任务——接近上限就写 checkpoint 交接、调 <code>wait_until_budget_refresh</code> 或交给对方接力,避免 token 耗尽卡在半路。本方案正是用它自己来保护它自己的开发过程。</div>
+
+<h2 id="scene"><span class="n">1</span>目标场景 & 诚实边界</h2>
+<p>长任务(自主循环)会在 5 小时滚动窗 / 周限额跑到一半被硬切,进度丢失。本项目把"随机硬切"变成"阈值处干净停 + 刷新后续接"。</p>
+<div class="note bad"><strong>不能绕过限额。</strong>额度耗尽 API 必拒,没有任何手段让 agent"用完还继续"。本方案只保证在耗尽<em>之前</em>停在干净点,并在窗口<em>刷新后</em>续接。</div>
+<div class="note warn"><strong>强制 vs 协作。</strong>真正<em>强制</em>的只有 <code>PreToolUse</code> deny 与 <code>Stop</code> 的 <code>continue:false</code>;"写 checkpoint""调 park 工具"是<em>协作式</em>——靠协议提示 agent 执行,非框架强制。</div>
+
+<h2 id="dream"><span class="n">2</span>「睡前设 Goal」最终答案</h2>
+<p>你设个 Goal 去睡觉,机器开着、无人操作:</p>
+<ol>
+  <li>跑到 <strong>T3(默认 92%)</strong> → 守卫让 agent 停止新工作,并<strong>调用 <code>wait_until_budget_refresh()</code> 原地 park</strong>(进程不退、不耗 token)。</li>
+  <li>几小时后 5h 窗口刷新 → 该工具检测到额度回落,<strong>返回</strong>。</li>
+  <li>agent 在<strong>同一会话、同一上下文</strong>里拿到返回,<strong>自动接着干</strong>——无外部注入、无 tmux、无 watchdog。</li>
+</ol>
+<div class="note ok"><strong>前提:</strong>进程活着(机器开,你只关心开机情况)。若进程意外死/配置错/机器睡 → <strong>C3 兜底</strong>(外部 watchdog 重新 <code>--resume</code>)。跨 Claude 和 Codex 都成立。</div>
+
+<h2 id="cont"><span class="n">3</span>续接架构:C4 主 / C1 备 / C3 兜底</h2>
+<table>
+  <thead><tr><th>路径</th><th>角色</th><th>机制</th><th>上下文 / token</th><th>适用</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><span class="badge b-teal">C4</span> 阻塞 MCP 工具</td>
+      <td><strong>跨两家主路</strong></td>
+      <td>agent 调 <code>wait_until_budget_refresh()</code>,阻塞轮询到刷新返回,同 turn 续</td>
+      <td>同会话不重放;<strong>park 期零 token</strong>(续接本身正常花)</td>
+      <td>进程活着(机器开)</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-blue">C1</span> CronCreate</td>
+      <td>Claude 专属可选</td>
+      <td>守卫停时排"刷新后"一次性同进程 cron,fire 注回 REPL</td>
+      <td>同 session 不重放</td>
+      <td>仅 Claude,进程活着</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-amber">C3</span> 外部 watchdog</td>
+      <td><strong>必备兜底</strong></td>
+      <td>launchd 按 reset 调度 → <code>claude --resume</code> / <code>codex exec resume</code>;或 tmux send-keys 注入活 TUI</td>
+      <td>磁盘 transcript 重放(token 尖峰)</td>
+      <td>进程死 / timeout 配错 / 机器睡 / headless</td>
+    </tr>
+    <tr>
+      <td><span class="badge b-gray">C2</span> 云端 Routine</td>
+      <td>本期不做</td>
+      <td>Claude 云端 /schedule,全新 session + 仓库 checkpoint</td>
+      <td>靠仓库 checkpoint</td>
+      <td>(机器关机才需要;Codex 无)</td>
+    </tr>
+  </tbody>
+</table>
+<div class="note"><strong>为什么 C4 当主路:</strong>它绕过了"外部往任意终端 TUI 注入输入"这个物理难题(进程独占 PTY,外部塞不进),改由 agent 自己调工具 park;还<strong>补上了 Codex 没有任何原生定时调度的短板</strong>(C1 只 Claude 有)。</div>
+
+<h2 id="c4"><span class="n">4</span>C4 机制详解:阻塞 MCP 工具</h2>
+<div class="flow">守卫(hook)              budget MCP server (stdio)        额度端点
+   │  util≥T3                      │                              │
+   │  deny 工具 + 提示             │                              │
+   │  "请调 wait_until_refresh"    │                              │
+ agent ──────调用工具─────────────▶│  轮询 usage ────────────────▶│
+   │         (turn 挂起等待)       │  util 仍高 → 阻塞(每 N 秒查) │
+   │         ⏳ 零 token            │      ……几小时……              │
+   │                               │  reset_epoch 过 / util 回落  │
+   │◀────────工具返回 {refreshed}──│                              │
+ agent 同 turn 继续干活 ──────────▶ (新窗口,正常消耗)</div>
+
+<h4>关键源码实证</h4>
+<table>
+  <thead><tr><th>事实</th><th>Claude Code</th><th>Codex</th></tr></thead>
+  <tbody>
+    <tr><td>MCP 工具调用超时</td><td>默认 ≈<strong>27.8h</strong>(<code>client.ts:209</code> <code>DEFAULT_MCP_TOOL_TIMEOUT_MS=100_000_000</code>),env <code>MCP_TOOL_TIMEOUT</code> 可调 —— <span class="badge b-green">开箱即用</span></td><td>默认 <strong>120s</strong>(<code>rmcp_client.rs:75</code>),<strong>按 server</strong> 配 <code>tool_timeout_sec</code>(<code>mcp_types.rs</code>)—— <span class="badge b-red">必须配高否则砍</span></td></tr>
+    <tr><td>等工具期间是否耗 token</td><td>否(agentic loop:调 API→执行工具阻塞→再调 API,<code>query.ts</code>)</td><td>否(<code>turn.rs</code> <code>drain_in_flight</code> 等待 in-flight)</td></tr>
+    <tr><td>server 能否主动推 turn</td><td colspan="2">否。MCP 是 client 拉;sampling/elicitation/notification 都不能开新 turn。理解"server 定时推消息进 agent"<strong>不可行</strong>。</td></tr>
+    <tr><td>transport</td><td colspan="2">stdio 最稳(无网络超时);HTTP/SSE 有 60s(claude)/网络 idle(codex)风险 → <strong>默认 stdio</strong></td></tr>
+  </tbody>
+</table>
+<div class="note warn"><strong>Codex 超时作用域(已确认):</strong><code>tool_timeout_sec</code> 是<strong>每个 MCP server 单独配</strong>(<code>mcp_servers: HashMap&lt;String, McpServerConfig&gt;</code>)。安装器只在 <code>[mcp_servers.budget-guard]</code> 写长超时,<strong>其它 server 保持 120s 安全默认</strong>,无全局副作用。doctor 硬校验此项配够。</div>
+
+<h2 id="stop"><span class="n">5</span>强停机制(T3 / 95%)</h2>
+<ul>
+  <li><strong>Stop <code>continue:false</code></strong> 可靠终止 query loop:claude <code>query.ts:1267-1280</code>(<code>stop_hook_prevented</code>,不可绕过);codex <code>turn.rs:547</code>(自然 Stop 点)。</li>
+  <li><strong>PreToolUse deny 所有 hook 可见工具</strong>(deny 只拒单次、agent 可换工具,故必须全拒)。<strong>Codex 现版覆盖 Bash + apply_patch + MCP + 扩展工具</strong>(<code>apply_patch.rs:450</code>),不再只 Bash。</li>
+  <li><strong>精确放行写 checkpoint</strong>:仅 <code>file_path</code> 精确等于 checkpoint 路径的 <code>Write/Edit/MultiEdit</code>(及 Codex 的 apply_patch);删除对命令文本的 basename substring grep(旧 <code>:167</code> 漏洞)。</li>
+  <li><strong>Codex 额外 pause goal</strong>:codex <code>/goal</code> 是 idle 续跑(<code>MaybeContinueIfIdle</code> <code>goals.rs:137</code>),停后会一空闲就自续 → 硬停须 <strong>pause active goal</strong>(优先 pause 而非 clear,保目标)+ 持续 deny 兜住。pause 机制按路径:TUI 走 <code>tmux send-keys "/goal pause"</code>;headless 无 TUI → app-server 控制或"pause 不可用则持续 deny"兜底。</li>
+</ul>
+
+<h2 id="usage"><span class="n">6</span>取数层(照 CodexBar 逻辑用 bash+jq 重写)</h2>
+<p>不照搬 Swift(CodexBar 是 1003 文件 GUI app),而是<strong>按其逻辑重新实现</strong> + 用其测试 fixture 当校验 oracle。</p>
+<ul>
+  <li><strong>provider 契约</strong>:<code>provider_&lt;name&gt;_fetch</code> 统一返回归一化 JSON,<strong>guard / watchdog / MCP server 共用同一份</strong>(消除现有重复实现)。</li>
+  <li><strong>双 max</strong>:<code>warn_util</code>(所有有 util 的滚动窗桶取 max,含无 reset 的)驱动<strong>全部三档(T1/T2/T3)</strong>——保守起见,任何桶满都该提醒/停;<code>hard_util</code>(只含 reset 可解析的桶)仅用于 burn-rate 预测和"刷新时间"展示。<code>extra_usage</code>(月度溢出额度,语义不同)<strong>只进 doctor、不驱动任何档</strong>。<span class="badge b-amber">语义修正</span>早期设计曾让 T3 用 hard_util,但当非 resettable 桶(如 opus 周限额未带 reset)是瓶颈时 hard_util=0 会漏判强停;cross-review 实证后统一为 warn_util 驱动三档,<code>pre</code>/<code>post</code>/<code>stop</code> 一致。</li>
+  <li><strong>全 bucket</strong>:Claude 遍历 <code>five_hour / seven_day / seven_day_opus / sonnet / oauth_apps / routines / extra_usage</code>(每个 <code>{utilization 0-100, resets_at ISO}</code>);Codex 遍历 <code>rate_limit.primary/secondary_window</code> + <code>additional_rate_limits[]</code>(<code>{used_percent, reset_at epoch, reset_after_seconds}</code>)。</li>
+  <li><strong>reset 解析</strong>:Claude ISO→epoch 用 jq <code>fromdateiso8601</code>(去小数秒);Codex <code>reset_at</code> epoch。删除 <code>v≤1 则×100</code> 启发式(会把 0.8% 误放大成 80%)。</li>
+  <li><strong>端点</strong>:Claude <code>GET api.anthropic.com/api/oauth/usage</code>(<code>anthropic-beta</code> + <code>User-Agent: claude-code/&lt;ver&gt;</code>);Codex <code>GET chatgpt.com/backend-api/wham/usage</code>(<code>ChatGPT-Account-Id</code> 取自 <code>~/.codex/auth.json</code> <code>tokens.account_id</code>;尊重 config.toml <code>chatgpt_base_url</code>)。</li>
+</ul>
+
+<h2 id="tiers"><span class="n">7</span>三档守卫 + doctor</h2>
+<div class="grid">
+  <div class="card"><h4>T1 · 提醒一次 <span class="tag">80%</span></h4>窗口内只提醒一次。<code>BUDGET_WARN_ONCE</code></div>
+  <div class="card"><h4>T2 · 每次提醒 <span class="tag">90%</span></h4>持续催收尾 + 写 checkpoint。<code>BUDGET_WARN_REPEAT</code></div>
+  <div class="card"><h4>T3 · 强停/park <span class="tag">92%</span></h4>deny + continue:false + 触发 C4/C1。<code>BUDGET_HARD</code>(激进可调 95)</div>
+</div>
+<ul>
+  <li>兼容:<code>BUDGET_SOFT</code> → <code>WARN_REPEAT</code> deprecated alias;校验 <code>0≤ONCE&lt;REPEAT&lt;HARD≤100</code>,runtime 非法回退默认。</li>
+  <li>T1 "一次" 用<strong>窗口指纹</strong> = <code>agent|scope(pwd -P)|赢家bucket|reset_epoch|档名</code>,存 <code>STATE_DIR/notified/&lt;agent&gt;_&lt;scope&gt;.json</code>;<strong>只按 reset_epoch 过期 prune</strong>(不用 util&lt;T1,避免边界抖动反复提醒)。</li>
+</ul>
+<h4>doctor(<code>budget_guard.sh &lt;agent&gt; doctor</code>,非 fail-open)</h4>
+<p>打印:token 来源 / endpoint / HTTP 状态 / JSON 合法性 / <strong>全 bucket 表(raw+normalized util、reset 解析)</strong> / 赢家桶 / 生效阈值(+alias 来源) / <strong>MCP server 注册 & codex tool_timeout_sec 是否配够</strong> / hook 配置 / state 目录。退出码 <span class="badge b-green">0 健康</span> <span class="badge b-amber">1 警告</span> <span class="badge b-red">2 auth/网络</span> <span class="badge b-red">3 schema</span> <span class="badge b-red">4 配置非法</span>。可测:<code>BUDGET_USAGE_FIXTURE</code> + <code>BUDGET_NOW_EPOCH</code>。</p>
+<div class="note"><strong>doctor 是防"静默失效"的元工具:</strong>fail-open 会把"端点/字段错"伪装成"守卫安静正常"。但 parser 必须同补丁修——doctor 只暴露,parser 修了才真保护。</div>
+
+<h2 id="components"><span class="n">8</span>组件清单</h2>
+<table>
+  <thead><tr><th>组件</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><code>budget_guard.sh</code>(hook 核心)</td><td>五 phase 分派:prompt 预估 / pre 硬线 deny / post 提醒+记录 / stop 强停+触发续接 / resume 注入 checkpoint。+ <code>doctor</code> 子命令。</td></tr>
+    <tr><td><strong>budget MCP server</strong>(新增,stdio)</td><td>暴露 <code>wait_until_budget_refresh()</code>(C4 主路)+ <code>check_budget()</code>;复用 provider 取数。</td></tr>
+    <tr><td><code>watchdog.sh</code>(C3 兜底)</td><td>launchd 调度,按 reset_epoch + 轮询;<code>--resume</code>/<code>exec resume</code>(<code>--sandbox workspace-write</code>)或 tmux send-keys;pending 改<strong>按项目/session 分文件队列,串行续</strong>。</td></tr>
+    <tr><td><code>provider_*</code>(共享取数)</td><td>统一归一化 JSON,guard/watchdog/MCP 三处共用。</td></tr>
+    <tr><td><code>install.sh</code>(两包)</td><td>幂等合并 hooks;<strong>注册 budget MCP server</strong>;<strong>codex 配 <code>[mcp_servers.budget-guard] tool_timeout_sec</code></strong>;写三档协议文本到 CLAUDE.md/AGENTS.md。</td></tr>
+  </tbody>
+</table>
+
+<h2 id="verified"><span class="n">8.5</span>已验证范围 & 限制(真机 E2E 结论 · 诚实边界)</h2>
+<div class="note ok"><strong>已真机 E2E 验证(可依赖):</strong>
+<ul>
+  <li><strong>Claude 守卫全套</strong>:<code>pre</code> 硬线 deny、<code>pre</code> 精确放行 checkpoint、<code>stop</code> 硬停(写 pending)—— tmux 真 <code>claude -p</code> 实测。</li>
+  <li><strong>C3 watchdog 续接(双家)</strong>:claude <code>--resume</code> + checkpoint STEP 1→2;codex <code>exec resume</code> + secret + thread_id 一致 —— 两家都证了<strong>上下文连续</strong>(非新会话)。这是<strong>可靠的无人值守续接路径</strong>。</li>
+  <li><strong>doctor 双家</strong>:真端点全 bucket 解析(claude seven_day / codex primary_window + additional_rate_limits[Spark])。</li>
+  <li><strong>Codex 守卫(交互 TUI)</strong>:TUI 里 PreToolUse 真触发 + <code>deny</code> + marker 不生成。</li>
+  <li>解析 / 三档 / fingerprint / checkpoint 安全 / cache CAS:85 单测 + 10 MCP 单测全过。</li>
+</ul></div>
+<div class="note bad"><strong>已知限制(不要声称覆盖):</strong>
+<ul>
+  <li><strong>Codex 守卫仅交互 TUI 可用</strong>。<code>codex exec</code>(headless,如 0.135.0)<strong>不触发 lifecycle hooks</strong>——hooks.json/config.toml 均试、feature enabled、bypass-trust、关 unified_exec 都无效。所以 headless codex 自主任务<strong>得不到 pre/post/stop 守卫</strong>(但 C3 watchdog 续接仍可用)。</li>
+  <li><strong>C4(阻塞 MCP 工具 park)= 交互/experimental</strong>。机制已验(直接调 + SDK E2E:park→flip→ready),但真 agent 在 headless 调用两家都不通(claude <code>-p</code> 不调长阻塞工具;codex <code>exec</code> 在 handler 前 <code>user cancelled</code>)。C4 的真实用途是交互会话;headless 续接走 C3。</li>
+  <li><code>codex exec</code> 跑 MCP 工具需顶层 <code>--ask-for-approval never</code>(非交互默认取消)。</li>
+  <li>out-of-cwd 绝对 checkpoint 的祖先目录 symlink 不查(非默认配置);cache CAS 未做多进程压测;Node 侧 burn-rate 未实现(bash 专属)。</li>
+</ul></div>
+
+<h2 id="bugs"><span class="n">9</span>现有代码的真实问题(均已实证)</h2>
+<table>
+  <thead><tr><th>级别</th><th>问题</th><th>证据</th></tr></thead>
+  <tbody>
+    <tr><td><span class="badge b-red">P0</span></td><td>只读 <code>five_hour</code>+<code>seven_day</code>,漏模型分桶 → 重度用 Opus/Sonnet 时"该响不响"</td><td><code>budget_guard.sh:59-60</code> vs live schema</td></tr>
+    <tr><td><span class="badge b-red">P0</span></td><td>Codex 端点 URL 错 → 守卫空壳</td><td><code>:30</code> <code>codex/usage</code>(真机 403);真 URL <code>wham/usage</code></td></tr>
+    <tr><td><span class="badge b-red">P0</span></td><td>reset 恒"未知":<code>resets_at</code> ISO 被纯数字正则打成 0</td><td><code>:81</code> → <code>:121</code></td></tr>
+    <tr><td><span class="badge b-amber">P1</span></td><td>reset 固定取 five_hour(应配对 max 桶)</td><td><code>:62</code></td></tr>
+    <tr><td><span class="badge b-amber">P1</span></td><td>checkpoint 放行用裸 grep,含字样命令可绕硬线</td><td><code>:167</code></td></tr>
+    <tr><td><span class="badge b-amber">P2</span></td><td>burn-rate 两点法脆;多项目 pending/hist 单文件互覆盖</td><td><code>:99-118</code></td></tr>
+    <tr><td><span class="badge b-gray">SUSPECT</span></td><td>watchdog 与 guard 取数重复实现已漂移</td><td>watchdog.sh 自带 fetch</td></tr>
+  </tbody>
+</table>
+
+<h2 id="evidence"><span class="n">10</span>源码实证速查(file:line)</h2>
+<h4>claude-code v2.1.88(<code>~/repo/claude-code</code>)</h4>
+<ul>
+  <li><code>claude -p --resume &lt;sid&gt;</code> 加载全量 transcript 续跑:<code>cli/print.ts:5029</code>、<code>conversationRecovery.ts:456</code>;session 存 <code>~/.claude/projects/&lt;hash&gt;/&lt;uuid&gt;.jsonl</code>。</li>
+  <li>无本地控制面注入活会话(只有 bridge/<code>claude assistant</code>);Stop <code>continue:false</code> 可靠 <code>query.ts:1267</code>;deny 仅拒单次 <code>toolExecution.ts:1023</code>。</li>
+  <li>无内置 <code>/goal</code>;<code>/loop</code>→<code>CronCreate</code>(<code>loop.ts:28</code>),同进程 <code>setInterval</code> + 漏跑补偿 <code>cronScheduler.ts:216,456</code>;<code>/schedule</code>=云端 Routines <code>/v1/code/triggers</code>(全新 session)。</li>
+  <li>MCP 工具超时默认 27.8h <code>mcp/client.ts:209</code>;hook 是 shell command(默认 bash/$SHELL,可调任意可执行)<code>schemas/hooks.ts:33</code>。</li>
+</ul>
+<h4>codex-rs(<code>~/repo/codex</code>)</h4>
+<ul>
+  <li><code>codex exec resume &lt;sid&gt;</code> 加载 <code>~/.codex/sessions/.../rollout-*.jsonl</code> 续:<code>exec/src/lib.rs:690,772</code>。</li>
+  <li>无 agent 可自调 wall-clock 定时器;<code>/goal</code> idle 续跑 <code>goals.rs:137,1217</code>;PreToolUse 覆盖 Bash+apply_patch+MCP <code>apply_patch.rs:450</code>;<code>--full-auto</code> 废弃→<code>--sandbox workspace-write</code> <code>exec/src/cli.rs:42</code>。</li>
+  <li>MCP 工具超时默认 120s <code>rmcp_client.rs:75</code>,按 server <code>tool_timeout_sec</code> <code>mcp_types.rs</code>;RMCP peer 超时已禁用 <code>rmcp-client/.../rmcp_client.rs:590</code>;等工具 token-free <code>turn.rs</code> <code>drain_in_flight</code>。</li>
+</ul>
+<h4>CodexBar(<code>~/repo/CodexBar</code>,参考实现)</h4>
+<ul>
+  <li>Claude 全 bucket + ISO 解析:<code>ClaudeOAuthUsageFetcher.swift</code>;Codex <code>wham/usage</code> + account-id + schema:<code>CodexOAuthUsageFetcher.swift:233</code>。</li>
+</ul>
+
+<h2 id="test"><span class="n">11</span>测试 & tmux E2E</h2>
+<h4>fixture 单测(无真 token)</h4>
+<p><code>parse_usage</code> 喂 fixture:Claude(小数秒 ISO / sonnet 多桶赢 / null 桶 / extra_usage / reset 坏)、Codex(wham 根赢 / additional 赢 / epoch);阈值校验、fingerprint once、checkpoint 精确放行、doctor 退出码。用 <code>BUDGET_STATE_DIR</code>+<code>BUDGET_USAGE_FIXTURE</code>+<code>BUDGET_NOW_EPOCH</code>。CodexBar fixture 当 oracle。</p>
+<h4>tmux 真机 E2E(mock usage 驱动 80→90→95)</h4>
+<ul>
+  <li>真 <code>claude</code>/<code>codex</code> 跑进 tmux pane,<code>tmux send-keys</code> 喂输入、<code>capture-pane</code> 观察。</li>
+  <li>验:T3 真停;<strong>C4 park→唤醒→同 turn 续</strong>;C1 cron fire(claude);C3 <code>--resume</code>/<code>exec resume</code>。</li>
+  <li><strong>Codex tool_timeout_sec 对照</strong>:低值确认阻塞被砍(保护有效)vs 高值确认 C4 park 成功。</li>
+  <li>Codex <code>/goal</code> idle 续跑 vs pause+deny(验省略 pause 的失败模式)。</li>
+</ul>
+
+<h2 id="risks"><span class="n">12</span>待验证 / 风险(SUSPECT)</h2>
+<ul>
+  <li>C4 多小时 park 的进程/TUI 稳定性(无心跳硬限,但需 E2E 实测);interrupt/shutdown 会 abort 工具(codex <code>parallel.rs:103</code>)。</li>
+  <li><code>continue:false</code> 后 claude REPL + cron 调度器是否存活(C1 承重点)。</li>
+  <li>codex <code>/goal</code> idle 续跑是否被 pause+deny 稳定压住。</li>
+  <li>C4 依赖 agent <em>主动</em>调 park 工具(协作式);进程死/机器睡 → 退 C3。</li>
+</ul>
+
+<h2 id="flow"><span class="n">13</span>落地流程</h2>
+<ol>
+  <li>用户锁定本方案 → 主 agent(Claude)整理完整 build spec → <strong>Codex correctness 复核</strong>。</li>
+  <li>主 agent 在主仓库实现 → <strong>两轮全新 subagent 交叉评审</strong>(连续两轮 0 真实 issue 才过)。</li>
+  <li>Codex 真机验证 + tmux E2E(重点:C4 park/唤醒、codex tool_timeout_sec、C3 resume、codex goal idle vs pause+deny、parser/doctor 对真端点)。</li>
+  <li>过 gate 后才 commit / push。</li>
+</ol>
+
+<div class="foot">
+  token-budget-guard 最终技术方案 · Claude × Codex 收敛 · 全程 claude-code v2.1.88 / codex-rs / CodexBar 源码实证 · 2026-06<br>
+  仓库 <code>github.com/raysonmeng/token-budget-guard</code> · 状态:<strong>设计锁定,待开写</strong>
+</div>
+
+</div>
+</body>
+</html>

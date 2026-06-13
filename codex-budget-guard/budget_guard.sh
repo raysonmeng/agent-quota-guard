@@ -21,23 +21,129 @@
 set -uo pipefail
 AGENT="${1:-}"; PHASE="${2:-}"
 
+# 载入全局 + 项目配置(可选;两份都不存在则纯默认。必须在读 BUDGET_* 之前、
+# 且不能 cd —— 项目配置靠 $PWD 向上查找)
+_BGC_SELF_DIR="$(dirname "$0")"
+[ -f "$_BGC_SELF_DIR/budget-config.sh" ] && . "$_BGC_SELF_DIR/budget-config.sh" && load_budget_config
+
 # ───────── 可调参数 ─────────
-SOFT="${BUDGET_SOFT:-78}"                  # 软线:开始提示收尾
-HARD="${BUDGET_HARD:-88}"                  # 硬线:轮末强制停(留 ~12% 安全垫)
+WARN_ONCE="${BUDGET_WARN_ONCE:-80}"        # T1:本窗口提醒一次
+WARN_REPEAT="${BUDGET_WARN_REPEAT:-${BUDGET_SOFT:-90}}" # T2:每次提醒(BUDGET_SOFT 为旧 alias)
+SOFT="$WARN_REPEAT"                        # 兼容旧变量名
+HARD="${BUDGET_HARD:-92}"                  # T3:轮末强制停/park
 CACHE_TTL="${BUDGET_CACHE_TTL:-45}"        # 用量缓存秒
 HIST_WINDOW="${BUDGET_HIST_WINDOW:-900}"   # 速率估算回看窗口(秒,默认 15min)
 CHECKPOINT="${BUDGET_CHECKPOINT:-.agent/checkpoint.md}"
-CODEX_USAGE_URL="${BUDGET_CODEX_URL:-https://chatgpt.com/backend-api/codex/usage}"
+CODEX_USAGE_URL="${BUDGET_CODEX_URL:-https://chatgpt.com/backend-api/wham/usage}"
 STATE_DIR="${BUDGET_STATE_DIR:-$HOME/.budget-guard}"
+TMUX_TARGET="${BUDGET_TMUX_TARGET:-}"        # Codex TUI 目标,如 session:window.pane
+BUDGET_PROBE="${BUDGET_PROBE:-$HOME/.budget-guard/bin/budget-probe}"
+
+_bqg_uint_or_default() {
+  local value="$1" fallback="$2"
+  if [[ "$value" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$((10#$value))"
+  else
+    printf '%s' "$fallback"
+  fi
+}
+
+_bqg_validate_thresholds() {
+  local wo="$WARN_ONCE" wr="$WARN_REPEAT" hd="$HARD" invalid=0
+  [[ "$wo" =~ ^[0-9]+$ ]] || invalid=1
+  [[ "$wr" =~ ^[0-9]+$ ]] || invalid=1
+  [[ "$hd" =~ ^[0-9]+$ ]] || invalid=1
+  if (( invalid == 0 )); then
+    wo=$((10#$wo)); wr=$((10#$wr)); hd=$((10#$hd))
+    (( wo < wr && wr < hd && hd <= 100 )) || invalid=1
+  fi
+  if (( invalid != 0 )); then
+    WARN_ONCE=80; WARN_REPEAT=90; SOFT=90; HARD=92
+  else
+    WARN_ONCE="$wo"; WARN_REPEAT="$wr"; SOFT="$wr"; HARD="$hd"
+  fi
+}
+
+_bqg_validate_thresholds
+CACHE_TTL="$(_bqg_uint_or_default "$CACHE_TTL" 45)"
+HIST_WINDOW="$(_bqg_uint_or_default "$HIST_WINDOW" 900)"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 
 command -v jq >/dev/null 2>&1 || exit 0    # 没 jq 就静默放行
 INPUT="$(cat 2>/dev/null || true)"
 
+# ───────── 项目作用域 + 手动跳过硬线(override)─────────
+# 硬线默认仍拦;用户显式授权时(明确短语,绝不复用普通「继续」)记一个限时、
+# 按项目作用域的 marker,pre/stop 在硬线时若 marker 有效则放行,到期自动恢复。
+# Node 对应:lib/guard/hook.mjs 的 writeSkip / skipRemaining / OVERRIDE_RE。
+scope_hash() {
+  pwd -P 2>/dev/null | cksum | awk '{print $1}'
+}
+skip_ttl() {
+  local t="${BUDGET_SKIP_TTL:-1800}"
+  [[ "$t" =~ ^[0-9]+$ ]] || t=1800
+  printf '%s' "$t"
+}
+skip_marker() {
+  printf '%s/skip/%s_%s.json' "$STATE_DIR" "$AGENT" "$(scope_hash)"
+}
+write_skip() {
+  local dir="$STATE_DIR/skip" m exp tmp
+  mkdir -p "$dir" 2>/dev/null || true
+  m="$(skip_marker)"
+  exp=$(( $(date +%s) + $(skip_ttl) ))
+  tmp="${m}.tmp.$$"
+  # atomic write (tmp + rename), mirrors Node writeSkip / writePending so a
+  # concurrent reader never sees a torn marker.
+  printf '{"expires":%s}' "$exp" > "$tmp" 2>/dev/null && mv -f "$tmp" "$m" 2>/dev/null || true
+}
+# 回显剩余秒数(skip 有效)否则 0;过期则清理 marker。
+skip_remaining() {
+  local m exp now rem
+  m="$(skip_marker)"
+  [[ -f "$m" ]] || { echo 0; return; }
+  exp=$(jq -r '.expires // 0' "$m" 2>/dev/null || echo 0)
+  [[ "$exp" =~ ^[0-9]+$ ]] || exp=0
+  now=$(date +%s)
+  rem=$(( exp - now ))
+  if (( rem > 0 )); then echo "$rem"; else rm -f "$m" 2>/dev/null || true; echo 0; fi
+}
+
+# 显式跳过授权在「查不到用量就退出」之前处理(只记录授权,不需要用量)。
+if [[ "$PHASE" == "prompt" ]]; then
+  _ovr_text=$(printf '%s' "$INPUT" | jq -r '.prompt // .user_prompt // .tool_input.prompt // empty' 2>/dev/null || true)
+  if printf '%s' "$_ovr_text" | grep -Eiq '/budget-skip|force-continue|跳过硬线|强制继续'; then
+    write_skip
+    _ovr_mins=$(( ($(skip_ttl) + 59) / 60 ))
+    _ovr_msg="[额度] 已记录硬线手动跳过授权:接下来约 ${_ovr_mins} 分钟内,即使到硬线也不强停(触发窗口仍会提示),到期自动恢复拦截。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$_ovr_msg" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
+    else
+      jq -n --arg m "$_ovr_msg" '{systemMessage:$m}'
+    fi
+    exit 0
+  fi
+fi
+
 # ───────── 取用量:回显 "util reset_epoch"(带缓存)─────────
 fetch_usage() {
-  local cache="$STATE_DIR/usage_${AGENT}.json" now ts token creds resp util reset
+  local cache="$STATE_DIR/usage_${AGENT}.json" now ts token creds resp util reset probed bucket buckets
   now=$(date +%s)
+  if [[ -x "$BUDGET_PROBE" ]]; then
+    probed=$("$BUDGET_PROBE" --agent "$AGENT" 2>/dev/null || true)
+    # gate on warn_util (max across ALL windows, incl. non-resettable) to match
+    # the Node hook — all phases agree on warn_util; fall back to .util for older
+    # probes. reset stays the hard (resettable) winner's epoch below.
+    util=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | (.warn_util // .util) // empty' 2>/dev/null || true)
+    reset=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | .reset_epoch // 0' 2>/dev/null || true)
+    bucket=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | ((.warn_bucket_id // .bucket_id) // empty | tostring | gsub("[[:space:]]+";"_"))' 2>/dev/null || true)
+    buckets=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | [.buckets[]? | select(.util != null) | "\((.id // "unknown") | tostring | gsub("[[:space:]]+";"_"))=\((.util // 0) | floor)%"] | join(",")' 2>/dev/null || true)
+    if [[ -n "$util" && "$util" =~ ^[0-9]+$ ]]; then
+      [[ "$reset" =~ ^[0-9]+$ ]] || reset=0
+      printf '%s %s %s %s' "$util" "$reset" "${bucket:-"-"}" "${buckets:-"-"}"
+      return
+    fi
+  fi
   if [[ -f "$cache" ]]; then
     ts=$(jq -r '.ts // 0' "$cache" 2>/dev/null || echo 0)
     if (( now - ts < CACHE_TTL )); then
@@ -126,8 +232,60 @@ fmt_dur() { # 秒 -> "约 N 分钟" / "约 N 小时"
   if (( s<5400 )); then echo "约 $(( (s+59)/60 )) 分钟"; else echo "约 $(awk -v s="$s" 'BEGIN{printf "%.1f", s/3600}') 小时"; fi
 }
 
+usage_detail() {
+  local bucket="${1:-}" buckets="${2:-}" detail=""
+  [[ "$bucket" == "-" || "$bucket" == "null" ]] && bucket=""
+  [[ "$buckets" == "-" || "$buckets" == "null" ]] && buckets=""
+  [[ -n "$bucket" ]] && detail="触发窗口:${bucket}"
+  if [[ -n "$buckets" ]]; then
+    [[ -n "$detail" ]] && detail="${detail}; "
+    detail="${detail}窗口:${buckets}"
+  fi
+  [[ -n "$detail" ]] && printf '（%s）' "$detail"
+}
+
+warn_once_should_fire() {
+  local reset="$1" scope dir current
+  [[ "$reset" =~ ^[0-9]+$ ]] || reset=0
+  scope="$(scope_hash)"
+  dir="$STATE_DIR/notified"
+  mkdir -p "$dir" 2>/dev/null || true
+  current="$dir/${AGENT}_${scope}_${reset}_warn_once"
+  if [[ -f "$current" ]]; then
+    return 1
+  fi
+  find "$dir" -type f -name "${AGENT}_${scope}_*_warn_once" ! -name "$(basename "$current")" -delete 2>/dev/null || true
+  : > "$current" 2>/dev/null || true
+  return 0
+}
+
+is_checkpoint_write() {
+  local tool target cp_rel cp_abs target_abs
+  tool=$(printf '%s' "$INPUT" | jq -r '.tool_name // .tool // .name // empty' 2>/dev/null || true)
+  [[ "$tool" == "Bash" || "$tool" == "bash" ]] && return 1
+  case "$tool" in
+    Write|Edit|MultiEdit|NotebookEdit|apply_patch) ;;
+    *) return 1 ;;
+  esac
+  target=$(printf '%s' "$INPUT" | jq -r '.tool_input.file_path // .tool_input.path // .file_path // .path // empty' 2>/dev/null || true)
+  [[ -n "$target" ]] || return 1
+  cp_rel="${CHECKPOINT#./}"
+  target="${target#./}"
+  [[ "$target" == "$cp_rel" || "$target" == "$CHECKPOINT" ]] && return 0
+  cp_abs="$PWD/$cp_rel"
+  target_abs="$target"
+  [[ "$target_abs" != /* ]] && target_abs="$PWD/$target_abs"
+  [[ "$target_abs" == "$cp_abs" ]]
+}
+
+pause_codex_goal_if_possible() {
+  [[ "$AGENT" == "codex" && -n "$TMUX_TARGET" ]] || return 0
+  command -v tmux >/dev/null 2>&1 || return 0
+  tmux send-keys -t "$TMUX_TARGET" "/goal pause" C-m >/dev/null 2>&1 || true
+}
+
 # 取用量
-read -r UTIL RESET <<<"$(fetch_usage)"
+read -r UTIL RESET BUCKET_ID BUCKETS_SUMMARY <<<"$(fetch_usage)"
 [[ -z "${UTIL:-}" || ! "$UTIL" =~ ^[0-9]+$ ]] && exit 0   # 查不到 -> 静默放行
 
 # ───────── prompt:长任务启动预估(唯一「额度充足也提示」的情形)─────────
@@ -163,9 +321,10 @@ fi
 # ───────── pre:硬线拦新工作,放行写 checkpoint ─────────
 if [[ "$PHASE" == "pre" ]]; then
   if (( UTIL >= HARD )); then
-    tgt=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null || true)
-    if [[ -n "$tgt" ]] && printf '%s' "$tgt" | grep -q "$(basename "$CHECKPOINT")"; then exit 0; fi
-    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)。停止新工作:1) 把进度写入 ${CHECKPOINT}(写文件不拦);2) 用文字告诉我续接点;3) 不要再跑命令或换工具绕。刷新后(约 $(fmt_clock "$RESET"))发「继续」即可接上。"
+    pause_codex_goal_if_possible
+    if is_checkpoint_write; then exit 0; fi
+    if [[ "$(skip_remaining)" != "0" ]]; then exit 0; fi   # 手动跳过有效 → 静默放行
+    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。停止新工作:1) 把进度写入 ${CHECKPOINT}(写文件不拦);2) 用文字告诉我续接点;3) 不要再跑命令或换工具绕。刷新后(约 $(fmt_clock "$RESET"))发「继续」即可接上。"
     jq -n --arg x "$r" '{hookSpecificOutput:{hookEventName:"PreToolUse", permissionDecision:"deny", permissionDecisionReason:$x}}'
   fi
   exit 0
@@ -174,9 +333,16 @@ fi
 # ───────── post:记录速率;软线提示收尾 ─────────
 if [[ "$PHASE" == "post" ]]; then
   record_point "$UTIL"
-  if (( UTIL >= SOFT && UTIL < HARD )); then
+  if (( UTIL >= WARN_REPEAT && UTIL < HARD )); then
     secs=$(seconds_to_hard "$UTIL")
-    note="额度已用 ${UTIL}%(软线 ${SOFT}%),预计还能跑 $(fmt_dur "$secs")。收尾手头这步,把进度写进 ${CHECKPOINT} 准备暂停,别等硬线被打断。"
+    note="额度已用 ${UTIL}%(T2 ${WARN_REPEAT}%),预计还能跑 $(fmt_dur "$secs")。收尾手头这步,把进度写进 ${CHECKPOINT} 准备暂停,别等硬线被打断。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$note" '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}'
+    else
+      jq -n --arg m "$note" '{systemMessage:$m}'
+    fi
+  elif (( UTIL >= WARN_ONCE && UTIL < WARN_REPEAT )) && warn_once_should_fire "$RESET"; then
+    note="额度已用 ${UTIL}%(T1 ${WARN_ONCE}%),本窗口提醒一次。请确认当前目标能在剩余额度内收束,必要时写 ${CHECKPOINT}。"
     if [[ "$AGENT" == "claude" ]]; then
       jq -n --arg c "$note" '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}'
     else
@@ -190,16 +356,30 @@ fi
 if [[ "$PHASE" == "stop" ]]; then
   record_point "$UTIL"
   if (( UTIL >= HARD )); then
+    _stop_rem="$(skip_remaining)"
+    if [[ "$_stop_rem" != "0" ]]; then
+      # 手动跳过有效:不强停、不写 pending,让循环继续(到期自动恢复)。
+      _stop_mins=$(( (_stop_rem + 59) / 60 ))
+      _stop_note="额度 ${UTIL}%≥${HARD}% 硬线$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY"),但已手动跳过(约 ${_stop_mins} 分钟后恢复拦截)。继续推进,注意在刷新前完成收尾。"
+      [[ "$AGENT" == "codex" ]] && jq -n --arg m "$_stop_note" '{systemMessage:$m}'
+      exit 0
+    fi
+    pause_codex_goal_if_possible
     # 写待续状态(watchdog 用)
     sid=$(printf '%s' "$INPUT" | jq -r '.session_id // .thread_id // empty' 2>/dev/null || true)
+    pending_dir="$STATE_DIR/pending"
+    mkdir -p "$pending_dir" 2>/dev/null || true
+    key=$(printf '%s\n%s\n' "$(pwd -P 2>/dev/null || pwd)" "$sid" | cksum | awk '{print $1}')
     jq -n --arg sid "$sid" --arg cwd "$(pwd)" --arg reset "$RESET" --arg util "$UTIL" \
       '{status:"paused", agent:env.AGENT, session_id:$sid, cwd:$cwd, reset:($reset|tonumber? // 0), util:($util|tonumber), at:(now|floor)}' \
-      > "$STATE_DIR/pending_${AGENT}.json" 2>/dev/null || true
-    stop="额度达硬线(${UTIL}%),已在本轮末尾干净停下并保存续接点。额度刷新约 $(fmt_clock "$RESET");之后发「继续」或由 watchdog 自动续跑。"
+      > "$pending_dir/${AGENT}_${key}.json" 2>/dev/null || true
+    stop="额度达硬线(${UTIL}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY"),已在本轮末尾干净停下并保存续接点。额度刷新约 $(fmt_clock "$RESET");之后发「继续」或由 watchdog 自动续跑。"
     jq -n --arg s "$stop" '{continue:false, stopReason:$s}'
-  elif (( UTIL >= SOFT )); then
+  elif (( UTIL >= WARN_REPEAT )); then
     secs=$(seconds_to_hard "$UTIL")
     jq -n --arg m "额度 ${UTIL}%,预计还能跑 $(fmt_dur "$secs")。建议本轮收尾并写 ${CHECKPOINT}。" '{systemMessage:$m}'
+  elif (( UTIL >= WARN_ONCE )) && warn_once_should_fire "$RESET"; then
+    jq -n --arg m "额度 ${UTIL}%(T1 ${WARN_ONCE}%),本窗口提醒一次。请确认当前目标能收束,必要时写 ${CHECKPOINT}。" '{systemMessage:$m}'
   fi
   exit 0
 fi
