@@ -17,6 +17,10 @@ function escapeRe(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function isClaudePreGuardCommand(command) {
+  return /guard\.mjs"? claude pre/.test(command);
+}
+
 test("claude installer preserves marker examples and replaces CLAUDE.md block in place", async () => {
   const home = await mkdtemp(resolve(tmpdir(), "budget-claude-memory-home-"));
   const claudeDir = resolve(home, ".claude");
@@ -157,7 +161,7 @@ test("claude installer removes only managed hooks inside shared settings.json en
     ["echo read-keep"]
   );
   assert.equal(
-    installed.hooks.PreToolUse.filter((entry) => entry.hooks?.some((hook) => /guard\.mjs claude pre/.test(hook.command))).length,
+    installed.hooks.PreToolUse.filter((entry) => entry.hooks?.some((hook) => isClaudePreGuardCommand(hook.command))).length,
     1
   );
 
@@ -171,7 +175,7 @@ test("claude installer removes only managed hooks inside shared settings.json en
   assert.deepEqual(uninstalled.hooks.PreToolUse.find((entry) => entry.matcher === "Bash|Edit").hooks.map((hook) => hook.command), ["echo user-keep"]);
   assert.deepEqual(uninstalled.hooks.PreToolUse.find((entry) => entry.matcher === "Read").hooks.map((hook) => hook.command), ["echo read-keep"]);
   assert.equal(
-    uninstalled.hooks.PreToolUse.some((entry) => entry.hooks?.some((hook) => /guard\.mjs claude pre/.test(hook.command))),
+    uninstalled.hooks.PreToolUse.some((entry) => entry.hooks?.some((hook) => isClaudePreGuardCommand(hook.command))),
     false
   );
 });
@@ -185,10 +189,16 @@ test("claude installer recognizes managed hook commands when HOME contains space
   install({ home, srcRoot: root, skipDoctor: true });
 
   const installed = JSON.parse(await readFile(result.settingsPath, "utf8"));
+  const preCommands = installed.hooks.PreToolUse
+    .flatMap((entry) => entry.hooks || [])
+    .map((hook) => hook.command)
+    .filter(isClaudePreGuardCommand);
   assert.equal(
-    installed.hooks.PreToolUse.filter((entry) => entry.hooks?.some((hook) => /guard\.mjs claude pre/.test(hook.command))).length,
+    installed.hooks.PreToolUse.filter((entry) => entry.hooks?.some((hook) => isClaudePreGuardCommand(hook.command))).length,
     1
   );
+  assert.deepEqual(preCommands, [`"${result.binDir}/guard.mjs" claude pre`]);
+  assert.match(preCommands[0], new RegExp(`^"${escapeRe(result.binDir)}/guard\\.mjs" claude pre$`));
 
   uninstall({
     settingsPath: result.settingsPath,
@@ -198,7 +208,7 @@ test("claude installer recognizes managed hook commands when HOME contains space
   });
   const uninstalled = JSON.parse(await readFile(result.settingsPath, "utf8"));
   assert.equal(
-    uninstalled.hooks?.PreToolUse?.some((entry) => entry.hooks?.some((hook) => /guard\.mjs claude pre/.test(hook.command))),
+    uninstalled.hooks?.PreToolUse?.some((entry) => entry.hooks?.some((hook) => isClaudePreGuardCommand(hook.command))),
     undefined
   );
 });

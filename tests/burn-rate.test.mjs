@@ -11,10 +11,11 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 
 import {
@@ -78,6 +79,10 @@ function closeTo(actual, expected, eps = 1e-6) {
     Math.abs(actual - expected) < eps,
     `expected ${actual} to be within ${eps} of ${expected}`,
   );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ─── classifySamplePair / instantRate ───────────────────────────────────────
@@ -518,6 +523,65 @@ function readBurnFile(dir) {
   return JSON.parse(readFileSync(join(dir, 'burn_claude.json'), 'utf8'));
 }
 
+function spawnCachedProbe(dir, fetchedAt, util) {
+  const moduleUrl = pathToFileURL(join(ROOT, 'lib', 'probe', 'index.mjs')).href;
+  const script = `
+    import { fetchUsage, writeCache } from ${JSON.stringify(moduleUrl)};
+
+    const fetchedAt = Number(process.argv[1]);
+    const util = Number(process.argv[2]);
+    const fiveReset = ${FIVE_RESET};
+    const sevenReset = ${SEVEN_RESET};
+    const raw = {
+      five_hour: { utilization: util, resets_at: new Date(fiveReset * 1000).toISOString() },
+      seven_day: { utilization: util, resets_at: new Date(sevenReset * 1000).toISOString() },
+    };
+
+    if (!writeCache('claude', { fetched_at: fetchedAt, raw, cap_util: util })) {
+      throw new Error('cache write was rejected');
+    }
+    const result = await fetchUsage('claude', { now: fetchedAt + 5 });
+    if (!result.ok || result.fetched_at !== fetchedAt || result.util !== util) {
+      throw new Error(\`unexpected probe result: \${JSON.stringify(result)}\`);
+    }
+    process.stdout.write(JSON.stringify({ fetched_at: result.fetched_at, util: result.util }) + '\\n');
+  `;
+  const env = {
+    ...process.env,
+    HOME: dir,
+    BUDGET_STATE_DIR: dir,
+    BUDGET_CACHE_TTL: '300',
+    BUDGET_NO_TOKEN_DISCOVERY: '1',
+  };
+  delete env.BUDGET_USAGE_FIXTURE;
+  delete env.BUDGET_NOW_EPOCH;
+  delete env.BUDGET_CLAUDE_TOKEN;
+
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script, String(fetchedAt), String(util)], {
+    cwd: dir,
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const done = new Promise((resolve, reject) => {
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('error', reject);
+    child.on('exit', (code, signal) => {
+      if (code === 0) {
+        resolve(stdout);
+      } else {
+        reject(new Error(`probe child failed code=${code} signal=${signal}\nstdout=${stdout}\nstderr=${stderr}`));
+      }
+    });
+  });
+  return { child, done };
+}
+
 test('integration: first probe → probe_schema 2, v1 fields intact, burn fields omitted', async () => {
   const dir = tempDir();
   try {
@@ -607,6 +671,55 @@ test('integration: repeated probes on the same cached fetch do not flood samples
       const onDisk = readBurnFile(dir);
       assert.equal(onDisk.buckets.five_hour.samples.length, 1, 'dedup by fetched_at');
       assert.equal(onDisk.buckets.five_hour.ewma, null);
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integration: concurrent fresh probes do not lose burn samples', {
+  skip: process.platform === 'win32' ? 'SIGSTOP/SIGCONT are POSIX-only' : false,
+}, async () => {
+  const dir = tempDir();
+  try {
+    await withEnvAsync(baseEnv(dir), async () => {
+      await pollAt(NOW, 10);
+      const burnPath = join(dir, 'burn_claude.json');
+      const lockPath = `${burnPath}.lock`;
+      writeFileSync(lockPath, 'test-held-lock');
+      let second = null;
+      let secondStopped = false;
+
+      try {
+        const first = spawnCachedProbe(dir, NOW + 1800, 11);
+        await sleep(250);
+        second = spawnCachedProbe(dir, NOW + 3600, 12);
+        await sleep(250);
+        second.child.kill('SIGSTOP');
+        secondStopped = true;
+        await sleep(50);
+        unlinkSync(lockPath);
+
+        await first.done;
+        second.child.kill('SIGCONT');
+        secondStopped = false;
+        await second.done;
+      } finally {
+        if (secondStopped && second) {
+          try { second.child.kill('SIGCONT'); } catch (_) { /* best-effort cleanup */ }
+        }
+        if (existsSync(lockPath)) {
+          try { unlinkSync(lockPath); } catch (_) { /* best-effort cleanup */ }
+        }
+      }
+
+      const onDisk = readBurnFile(dir);
+      assert.equal(onDisk.buckets.five_hour.samples.length, 3);
+      assert.deepEqual(
+        onDisk.buckets.five_hour.samples.map((sample) => sample.ts),
+        [NOW, NOW + 1800, NOW + 3600],
+      );
+      assert.equal(onDisk.buckets.five_hour.ewma.valid_samples, 2);
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });
