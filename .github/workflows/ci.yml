@@ -1,0 +1,44 @@
+name: CI
+
+# agent-quota-guard 的发布门禁。主包是零依赖的 Node ESM（node --test 直接跑），
+# codex-budget-guard 子包有 MCP SDK / zod 依赖，需先 npm ci。两套测试都跑、
+# 任一失败即挂红。matrix 跑 macOS + Linux —— guard 主用 macOS（Keychain 读 token、
+# ps 解析、tmux 路径都是 darwin 特有），Linux 保证可移植性。
+#
+# CI gate for agent-quota-guard. The main package is zero-dependency Node ESM
+# (run directly with node --test); the codex-budget-guard subpackage depends on
+# the MCP SDK / zod, so it needs npm ci first. Both suites run on macOS + Linux.
+
+on:
+  push:
+    branches: [main, feat/node-rewrite-3tier-mcp]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # 主包零依赖：直接 node --test 跑全部 tests/*.test.mjs（不含 e2e/ 的 tmux 手动脚本）。
+      - name: Main package tests (zero-dep, node --test)
+        run: node --test tests/*.test.mjs
+
+      # codex 子包有依赖：npm ci 锁定安装后跑其自带 test 脚本（node --test test/*.test.mjs）。
+      - name: codex-budget-guard subpackage deps
+        working-directory: codex-budget-guard
+        run: npm ci
+
+      - name: codex-budget-guard subpackage tests
+        working-directory: codex-budget-guard
+        run: npm test
