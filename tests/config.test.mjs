@@ -322,10 +322,12 @@ test("Bash guard falls back to default thresholds when config hard is out of ran
 
   assert.equal(result.code, 0, `budget_guard should fail open only on probe issues, stderr=${result.stderr}`);
   assert.match(result.stdout, /额度已达硬线\(95% ≥ 92%\)/);
+  assert.doesNotMatch(result.stdout, /permissionDecision/);
+  assert.match(result.stdout, /不会强制拦截/);
   await rm(root, { recursive: true, force: true });
 });
 
-test("Bash guard hard-line message names the driving Codex usage window", async () => {
+test("Bash guard hard-line reminder names the driving Codex usage window", async () => {
   const { root, state, deep } = await scratch();
   const fakeProbe = join(root, "fake-probe");
   await writeFile(fakeProbe, [
@@ -358,10 +360,12 @@ test("Bash guard hard-line message names the driving Codex usage window", async 
     timeout: 10_000
   });
 
-  assert.equal(result.code, 0, `budget_guard should deny without crashing, stderr=${result.stderr}`);
+  assert.equal(result.code, 0, `budget_guard should remind without crashing, stderr=${result.stderr}`);
   assert.match(result.stdout, /额度已达硬线\(100% ≥ 92%\)/);
   assert.match(result.stdout, /触发窗口:additional_rate_limits\[GPT_5_Codex\]\.secondary_window/);
   assert.match(result.stdout, /rate_limit\.primary_window=77%/);
+  assert.doesNotMatch(result.stdout, /permissionDecision/);
+  assert.match(result.stdout, /不会强制拦截/);
   await rm(root, { recursive: true, force: true });
 });
 
@@ -393,7 +397,7 @@ test("Bash budget-probe emits warn_bucket_id; bucket_id stays the resettable win
   await rm(root, { recursive: true, force: true });
 });
 
-test("Bash guard hard line gates on warn_util and labels 触发窗口 by warn_bucket_id (parity with Node)", async () => {
+test("Bash guard hard line reminds on warn_util and labels 触发窗口 by warn_bucket_id (parity with Node)", async () => {
   const { root, state, deep } = await scratch();
   const fakeProbe = join(root, "fake-probe");
   // hard_util=50 (would NOT trip the old .util gate), warn_util=95 (trips it).
@@ -424,10 +428,12 @@ test("Bash guard hard line gates on warn_util and labels 触发窗口 by warn_bu
     timeout: 10_000
   });
 
-  assert.equal(result.code, 0, `budget_guard should deny without crashing, stderr=${result.stderr}`);
+  assert.equal(result.code, 0, `budget_guard should remind without crashing, stderr=${result.stderr}`);
   assert.match(result.stdout, /额度已达硬线\(95% ≥ 92%\)/, "gates + displays warn_util=95, not hard_util=50");
   assert.match(result.stdout, /触发窗口:rate_limit\.secondary_window/, "labels the warn winner");
   assert.doesNotMatch(result.stdout, /触发窗口:rate_limit\.primary_window/, "not the resettable hard winner");
+  assert.doesNotMatch(result.stdout, /permissionDecision/);
+  assert.match(result.stdout, /不会强制拦截/);
   await rm(root, { recursive: true, force: true });
 });
 

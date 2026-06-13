@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync,
+  existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -149,9 +149,9 @@ test('Node phasePrompt: codex override grant uses systemMessage', async () => {
   }
 });
 
-// ─── Node: pre / stop honor an active skip; deny/force-stop without one ────
+// ─── Node: pre / stop honor an active skip; remind/force-stop without one ───
 
-test('Node phasePre: active skip allows at hard line; absent skip denies', async () => {
+test('Node phasePre: active skip allows at hard line; absent skip reminds without deny', async () => {
   // with skip
   const dir = tempDir();
   try {
@@ -169,8 +169,10 @@ test('Node phasePre: active skip allows at hard line; absent skip denies', async
   try {
     const fx2 = makeClaudeHardFixture(dir2, 95);
     const env2 = { BUDGET_STATE_DIR: dir2, BUDGET_CWD_OVERRIDE: dir2, BUDGET_NOW_EPOCH: String(NOW), BUDGET_USAGE_FIXTURE: fx2 };
-    const denied = await withEnvAsync(env2, () => phasePre('claude', JSON.parse(BASH_INPUT), TH));
-    assert.equal(denied?.hookSpecificOutput?.permissionDecision, 'deny', 'no skip → pre denies');
+    const reminded = await withEnvAsync(env2, () => phasePre('claude', JSON.parse(BASH_INPUT), TH));
+    assert.equal(reminded?.hookSpecificOutput?.permissionDecision, undefined, 'no skip → pre does not deny');
+    assert.equal(reminded?.hookSpecificOutput?.permissionDecisionReason, undefined, 'no skip → no deny reason');
+    assert.match(reminded?.hookSpecificOutput?.additionalContext || '', /不会强制拦截/, 'no skip → pre reminds');
   } finally {
     rmSync(dir2, { recursive: true, force: true });
   }
@@ -270,7 +272,7 @@ test('Node phasePost: without a skip, T3 warns the Stop hook will force-stop', a
   }
 });
 
-test('Node: an expired skip re-enables the hard-line deny and cleans the marker', async () => {
+test('Node: an expired skip re-enables the hard-line reminder and cleans the marker', async () => {
   const dir = tempDir();
   try {
     const fx = makeClaudeHardFixture(dir, 95);
@@ -278,10 +280,11 @@ test('Node: an expired skip re-enables the hard-line deny and cleans the marker'
     await withEnvAsync(grantEnv, () => phasePrompt('claude', { prompt: '/budget-skip' }, TH));
     assert.ok(existsSync(nodeSkipMarker(dir, 'claude', dir)), 'marker present right after grant');
 
-    // 61s later: marker expired → pre must deny again and remove the stale marker
+    // 61s later: marker expired → pre must remind again and remove the stale marker
     const lateEnv = { BUDGET_STATE_DIR: dir, BUDGET_CWD_OVERRIDE: dir, BUDGET_NOW_EPOCH: String(NOW + 61), BUDGET_USAGE_FIXTURE: fx };
-    const denied = await withEnvAsync(lateEnv, () => phasePre('claude', JSON.parse(BASH_INPUT), TH));
-    assert.equal(denied?.hookSpecificOutput?.permissionDecision, 'deny', 'expired skip → deny');
+    const reminded = await withEnvAsync(lateEnv, () => phasePre('claude', JSON.parse(BASH_INPUT), TH));
+    assert.equal(reminded?.hookSpecificOutput?.permissionDecision, undefined, 'expired skip → no deny');
+    assert.match(reminded?.hookSpecificOutput?.additionalContext || '', /不会强制拦截/, 'expired skip → reminder returns');
     assert.equal(existsSync(nodeSkipMarker(dir, 'claude', dir)), false, 'expired marker cleaned up');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -370,14 +373,16 @@ test('Bash: an active skip lets pre allow at the hard line and keeps stop from f
   }
 });
 
-test('Bash: without a skip, the hard line still denies (pre) and force-stops (stop)', async () => {
+test('Bash: without a skip, the hard line reminds (pre) and force-stops (stop)', async () => {
   const { root, state, proj, fakeProbe } = await bashScratch();
   try {
     const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe };
 
     const pre = await runBash([guardPath, 'claude', 'pre'], { cwd: proj, env, input: BASH_INPUT });
     assert.equal(pre.code, 0, `pre stderr=${pre.stderr}`);
-    assert.match(pre.stdout, /额度已达硬线\(95% ≥ 92%\)/, 'no skip → pre denies');
+    assert.match(pre.stdout, /额度已达硬线\(95% ≥ 92%\)/, 'no skip → pre emits static hard-line reminder');
+    assert.doesNotMatch(pre.stdout, /permissionDecision/, 'no skip → pre does not deny');
+    assert.match(pre.stdout, /不会强制拦截/, 'bash pre uses static slowdown reminder');
 
     const stop = await runBash([guardPath, 'claude', 'stop'], {
       cwd: proj, env, input: JSON.stringify({ session_id: 's1' }),
@@ -390,7 +395,7 @@ test('Bash: without a skip, the hard line still denies (pre) and force-stops (st
   }
 });
 
-test('Bash: an expired skip marker re-enables the hard-line deny', async () => {
+test('Bash: an expired skip marker re-enables the hard-line reminder', async () => {
   const { root, state, proj, fakeProbe } = await bashScratch();
   try {
     const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe };
@@ -407,9 +412,49 @@ test('Bash: an expired skip marker re-enables the hard-line deny', async () => {
 
     const pre = await runBash([guardPath, 'claude', 'pre'], { cwd: proj, env, input: BASH_INPUT });
     assert.equal(pre.code, 0, `pre stderr=${pre.stderr}`);
-    assert.match(pre.stdout, /额度已达硬线/, 'expired skip → pre denies again');
+    assert.match(pre.stdout, /额度已达硬线/, 'expired skip → pre reminds again');
+    assert.doesNotMatch(pre.stdout, /permissionDecision/, 'expired skip → no deny');
     assert.equal(existsSync(join(skipDir, markers[0])), false, 'expired marker cleaned up');
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Bash pending payload matches Node schema and writes scoped plus legacy files', async () => {
+  const nodeDir = tempDir();
+  const { root, state, proj, fakeProbe } = await bashScratch();
+  try {
+    const nodeFixture = makeClaudeHardFixture(nodeDir, 95);
+    await withEnvAsync(
+      { BUDGET_STATE_DIR: nodeDir, BUDGET_CWD_OVERRIDE: nodeDir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_USAGE_FIXTURE: nodeFixture },
+      () => phaseStop('claude', { session_id: 's1' }, TH),
+    );
+    const nodeScopedName = readdirSync(join(nodeDir, 'pending')).find((f) => /^claude_.*\.json$/.test(f));
+    const nodePending = JSON.parse(await readFile(join(nodeDir, 'pending', nodeScopedName), 'utf8'));
+
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe };
+    const stop = await runBash([guardPath, 'claude', 'stop'], {
+      cwd: proj, env, input: JSON.stringify({ session_id: 's1' }),
+    });
+    assert.equal(stop.code, 0, `stop stderr=${stop.stderr}`);
+
+    const bashScopedName = readdirSync(join(state, 'pending')).find((f) => /^claude_.*\.json$/.test(f));
+    const bashPending = JSON.parse(await readFile(join(state, 'pending', bashScopedName), 'utf8'));
+    const bashLegacy = JSON.parse(await readFile(join(state, 'pending_claude.json'), 'utf8'));
+
+    assert.deepEqual(Object.keys(bashPending).sort(), Object.keys(nodePending).sort());
+    assert.deepEqual(Object.keys(bashLegacy).sort(), Object.keys(nodePending).sort());
+    assert.equal(bashPending.status, 'paused');
+    assert.equal(bashPending.agent, 'claude');
+    assert.equal(bashPending.session_id, 's1');
+    assert.equal(realpathSync(bashPending.cwd), realpathSync(proj));
+    assert.equal(bashPending.reset_epoch, 0);
+    assert.equal(bashPending.util, 95);
+    assert.equal(bashPending.warn_util, 95);
+    assert.equal(typeof bashPending.at, 'number');
+    assert.deepEqual(bashLegacy, bashPending);
+  } finally {
+    rmSync(nodeDir, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });
   }
 });

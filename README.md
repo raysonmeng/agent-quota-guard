@@ -95,7 +95,7 @@ Sometimes you're a few steps from done and would rather push through than stop a
 
 - `/budget-skip` · `force-continue` · `跳过硬线` · `强制继续`
 
-This records a **time-boxed** (default 30 min, `BUDGET_SKIP_TTL`), **per-project** grant: while it's valid the hard line won't deny tools or force a round-end stop. It auto-expires and the guard then re-enforces normally. A plain "continue" never triggers it — the phrase must be explicit. This only delays a *clean* stop; it **cannot** create quota — once the API refuses requests, nothing keeps the agent running.
+This records a **time-boxed** (default 30 min, `BUDGET_SKIP_TTL`), **per-project** grant: while it's valid the hard line won't emit PreToolUse slowdown reminders or force a round-end stop. It auto-expires and the guard then resumes normal reminders plus clean round-end stops. A plain "continue" never triggers it — the phrase must be explicit. This only delays a *clean* stop; it **cannot** create quota — once the API refuses requests, nothing keeps the agent running.
 
 ---
 
@@ -308,7 +308,7 @@ cd agent-quota-guard
 
 - `/budget-skip` · `force-continue` · `跳过硬线` · `强制继续`
 
-这会记录一个**限时**(默认 30 分钟,由 `BUDGET_SKIP_TTL` 控制)、**按项目作用域**的授权:有效期内硬线不再拦工具、也不在轮末强停;到期自动恢复正常拦截。普通的「继续」**不会**触发 —— 短语必须显式。它只是延后一次*干净*的停止,**并不能**凭空变出额度 —— API 一旦拒绝请求,谁也没法让 agent 继续跑。
+这会记录一个**限时**(默认 30 分钟,由 `BUDGET_SKIP_TTL` 控制)、**按项目作用域**的授权:有效期内硬线不再发 PreToolUse 减速提醒、也不在轮末强停;到期自动恢复正常提醒与轮末干净停。普通的「继续」**不会**触发 —— 短语必须显式。它只是延后一次*干净*的停止,**并不能**凭空变出额度 —— API 一旦拒绝请求,谁也没法让 agent 继续跑。
 
 ---
 

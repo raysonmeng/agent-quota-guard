@@ -29,7 +29,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | phase | 挂载事件 | 行为 |
 |---|---|---|
 | `prompt` | UserPromptSubmit | 检测 `/goal /loop /batch /background`,给规划预估(额度充足时出声的主要情形);另外检测**显式跳过短语**(`/budget-skip`/`force-continue`/`跳过硬线`/`强制继续`),命中则写限时 skip marker(不查用量) |
-| `pre` | PreToolUse | 硬线 deny 新工作工具,只精确放行已知写文件工具写 configured checkpoint 路径;**skip marker 有效则放行** |
+| `pre` | PreToolUse | 硬线/可信 runway 收尾保护线只发减速提醒,不 deny;checkpoint 写入与 **skip marker 有效** 时静默放行 |
 | `post` | PostToolUse | 追加一条 burn-rate 历史点;软线提示收尾(skip 有效时 T3 提示改为「不强停」措辞,且不消耗真实 T3 fingerprint) |
 | `stop` | Stop/SubagentStop | 循环轮末重估;硬线 `continue:false` 强停 + 写 `pending/<agent>_<scope>.json` 给 watchdog;**skip marker 有效则不强停、不写 pending** |
 | `resume` | SessionStart | 有上次 checkpoint 就注入上下文续接 |
@@ -37,9 +37,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **核心不变量(改代码别破坏):**
 - **fail-open**:查不到用量(网络/token/字段对不上/无 `jq`)一律 `exit 0` 静默放行。绝不因守卫自身问题卡死 agent。
 - **统一走 `exit 0 + JSON`**,从不混用 `exit 2`。输出协议见 README §10。
-- **静默优先**:`util < WARN_ONCE` 时除长任务预估外一个字不冒。
-- **硬线只在轮末停**(`stop` phase),`pre` 只拦工具不停整轮——避免执行中途切。
-- **手动跳过(override)只能延后干净停止,绝不绕过限额**:仅显式短语在 `prompt` phase 触发,写限时(`BUDGET_SKIP_TTL`,默认 1800s)、按项目作用域的 marker;`pre`/`stop` 在硬线时若 marker 有效则放行/不强停,到期自动恢复。所有错误路径 fail-safe 朝「无 skip → 继续拦截」(坏 marker = 当作过期)。`BUDGET_SKIP_TTL` 是 env-only(**不**在配置文件 ALLOWLIST 内),防止仓库内 `.budget-guard.conf` 偷偷拉长跳过时长。Node↔Bash 行为一致(scope 哈希各自实现:Node `sha256(realpath)`、Bash `cksum`,因每个 agent 只跑单一 runtime,无需互通)。
+- **静默优先**:`util < WARN_ONCE` 时除长任务预估和可信 runway 收尾保护线外一个字不冒。
+- **硬线只在轮末停**(`stop` phase),`pre` 只提醒不拦工具——避免执行中途切。
+- **手动跳过(override)只能延后干净停止,绝不绕过限额**:仅显式短语在 `prompt` phase 触发,写限时(`BUDGET_SKIP_TTL`,默认 1800s)、按项目作用域的 marker;`pre`/`stop` 在硬线时若 marker 有效则放行/不强停,到期自动恢复。所有错误路径 fail-safe 朝「无 skip → 继续提醒并在轮末干净停」(坏 marker = 当作过期)。`BUDGET_SKIP_TTL` 是 env-only(**不**在配置文件 ALLOWLIST 内),防止仓库内 `.budget-guard.conf` 偷偷拉长跳过时长。Bash 双包行为保持逐字节一致;Node hook 额外消费 probe v2 的可信 runway 字段,Bash guard 暂只走静态硬线提醒。
 
 **数据流 / 状态目录**(默认 `~/.budget-guard/`,`BUDGET_STATE_DIR` 可覆盖):
 - `usage_<agent>.json` —— 用量缓存(`BUDGET_CACHE_TTL` 秒,默认 45;PreToolUse 每次工具调用都跑,必须缓存)。
