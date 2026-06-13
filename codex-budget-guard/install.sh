@@ -37,8 +37,9 @@ if isinstance(cfg.get("hooks"), dict):
 if any(k in cfg for k in ("UserPromptSubmit","PreToolUse","PostToolUse","Stop","SessionStart")):
     roots.append(cfg)
 PHASES = r"(prompt|pre|post|stop|resume)"
-MANAGED_PATH_RE = re.compile(rf'^\s*(?:node\s+)?(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\](?:budget_guard\.sh|guard\.mjs)\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
-EXACT_GUARD_RE = re.compile(rf'^\s*{re.escape(guard)}\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
+MANAGED_BIN_RE = r"(?:budget_guard\.sh|guard\.mjs)"
+MANAGED_PATH_RE = re.compile(rf"^\s*(?:node\s+)?(?:(?:\"[^\"]*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}\")|(?:'[^']*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}')|(?:(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}))\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
+EXACT_GUARD_RE = re.compile(rf"^\s*(?:\"{re.escape(guard)}\"|'{re.escape(guard)}'|{re.escape(guard)})\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
 def is_managed_command(cmd):
     return isinstance(cmd,str) and (EXACT_GUARD_RE.search(cmd) or MANAGED_PATH_RE.search(cmd))
 def clean_budget_entry(entry):
@@ -107,8 +108,9 @@ COMMAND_RE = re.compile(
     re.S,
 )
 PHASES = r"(prompt|pre|post|stop|resume)"
-MANAGED_PATH_RE = re.compile(rf'^\s*(?:node\s+)?(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\](?:budget_guard\.sh|guard\.mjs)\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
-EXACT_GUARD_RE = re.compile(rf'^\s*{re.escape(guard)}\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
+MANAGED_BIN_RE = r"(?:budget_guard\.sh|guard\.mjs)"
+MANAGED_PATH_RE = re.compile(rf"^\s*(?:node\s+)?(?:(?:\"[^\"]*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}\")|(?:'[^']*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}')|(?:(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}))\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
+EXACT_GUARD_RE = re.compile(rf"^\s*(?:\"{re.escape(guard)}\"|'{re.escape(guard)}'|{re.escape(guard)})\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
 
 def mask_toml_strings(text):
     out = list(text)
@@ -314,6 +316,12 @@ def command_values_from_keys(group, key_re):
 
 def is_managed_command(cmd):
     return isinstance(cmd,str) and (EXACT_GUARD_RE.search(cmd) or MANAGED_PATH_RE.search(cmd))
+
+def shell_double_quote(value):
+    return '"' + re.sub(r'(["\\$`])', r'\\\1', str(value)) + '"'
+
+def managed_hook_command(phase):
+    return f"{shell_double_quote(guard)} {agent} {phase}"
 
 def is_budget_group(group):
     return any(is_managed_command(cmd) for cmd in command_values(group))
@@ -629,8 +637,9 @@ COMMAND_RE = re.compile(
     re.S,
 )
 PHASES = r"(prompt|pre|post|stop|resume)"
-MANAGED_PATH_RE = re.compile(rf'^\s*(?:node\s+)?(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\](?:budget_guard\.sh|guard\.mjs)\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
-EXACT_GUARD_RE = re.compile(rf'^\s*{re.escape(guard)}\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
+MANAGED_BIN_RE = r"(?:budget_guard\.sh|guard\.mjs)"
+MANAGED_PATH_RE = re.compile(rf"^\s*(?:node\s+)?(?:(?:\"[^\"]*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}\")|(?:'[^']*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}')|(?:(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}))\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
+EXACT_GUARD_RE = re.compile(rf"^\s*(?:\"{re.escape(guard)}\"|'{re.escape(guard)}'|{re.escape(guard)})\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
 
 def mask_toml_strings(text):
     out = list(text)
@@ -837,6 +846,12 @@ def command_values_from_keys(group, key_re):
 def is_managed_command(cmd):
     return isinstance(cmd,str) and (EXACT_GUARD_RE.search(cmd) or MANAGED_PATH_RE.search(cmd))
 
+def shell_double_quote(value):
+    return '"' + re.sub(r'(["\\$`])', r'\\\1', str(value)) + '"'
+
+def managed_hook_command(phase):
+    return f"{shell_double_quote(guard)} {agent} {phase}"
+
 def is_budget_group(group):
     return any(is_managed_command(cmd) for cmd in command_values(group))
 
@@ -926,7 +941,7 @@ def inline_hook_entry(event, phase, matcher=None):
         fields.append(f"matcher = {json.dumps(matcher)}")
     fields.append(
         'hooks = [{ type = "command", '
-        f"command = {json.dumps(f'{guard} {agent} {phase}')}, "
+        f"command = {json.dumps(managed_hook_command(phase))}, "
         "timeout = 15 }]"
     )
     return "{ " + ", ".join(fields) + " }"
@@ -1008,7 +1023,7 @@ def hook_group(event, phase, matcher=None):
         "",
         f"[[hooks.{event}.hooks]]",
         'type = "command"',
-        f"command = {json.dumps(f'{guard} {agent} {phase}')}",
+        f"command = {json.dumps(managed_hook_command(phase))}",
         "timeout = 15",
     ])
     return "\n".join(lines)
@@ -1133,8 +1148,9 @@ if isinstance(cfg.get("hooks"), dict):
 if any(k in cfg for k in ("UserPromptSubmit","PreToolUse","PostToolUse","Stop","SessionStart")):
     roots.append(cfg)
 PHASES = r"(prompt|pre|post|stop|resume)"
-MANAGED_PATH_RE = re.compile(rf'^\s*(?:node\s+)?(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\](?:budget_guard\.sh|guard\.mjs)\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
-EXACT_GUARD_RE = re.compile(rf'^\s*{re.escape(guard)}\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)')
+MANAGED_BIN_RE = r"(?:budget_guard\.sh|guard\.mjs)"
+MANAGED_PATH_RE = re.compile(rf"^\s*(?:node\s+)?(?:(?:\"[^\"]*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}\")|(?:'[^']*[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}')|(?:(?:/|~|\.{{1,2}}/|[A-Za-z]:[/\\]).*?[/\\]\.budget-guard[/\\]bin[/\\]{MANAGED_BIN_RE}))\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
+EXACT_GUARD_RE = re.compile(rf"^\s*(?:\"{re.escape(guard)}\"|'{re.escape(guard)}'|{re.escape(guard)})\s+{re.escape(agent)}\s+{PHASES}(?:\s|$)")
 def is_managed_command(cmd):
     return isinstance(cmd,str) and (EXACT_GUARD_RE.search(cmd) or MANAGED_PATH_RE.search(cmd))
 def clean_budget_entry(entry):

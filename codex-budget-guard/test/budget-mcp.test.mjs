@@ -22,6 +22,23 @@ async function readToml(path) {
   return JSON.parse(stdout);
 }
 
+function hookCommands(parsed, event) {
+  return (parsed.hooks?.[event] ?? [])
+    .flatMap((entry) => entry.hooks ?? [])
+    .map((hook) => hook.command)
+    .filter((command) => typeof command === "string");
+}
+
+function budgetCommands(parsed, event, phase) {
+  return hookCommands(parsed, event)
+    .filter((command) => command.includes("budget_guard.sh") && command.endsWith(` codex ${phase}`));
+}
+
+async function firstShellArg(command) {
+  const { stdout } = await execFileAsync("/bin/sh", ["-lc", `set -- ${command}; printf '%s\\n' "$1"`]);
+  return stdout.trim();
+}
+
 test("budget-probe parses Codex wham usage and picks model weekly max", async () => {
   const fixture = resolve(root, "..", "tests", "fixtures", "codex-wham-usage.json");
 
@@ -195,9 +212,10 @@ test("codex installer writes config.toml hooks idempotently and uninstalls them"
   assert.match(installed, /\[\[hooks\.PostToolUse\]\]\nmatcher = "\*"/);
   assert.match(installed, /\[\[hooks\.Stop\]\]/);
   assert.match(installed, /\[\[hooks\.SessionStart\]\]/);
-  assert.equal((installed.match(/budget_guard\.sh codex pre/g) || []).length, 1);
-  assert.equal((installed.match(/budget_guard\.sh codex post/g) || []).length, 1);
-  assert.equal((installed.match(/budget_guard\.sh codex stop/g) || []).length, 1);
+  const parsedInstalled = await readToml(configPath);
+  assert.equal(budgetCommands(parsedInstalled, "PreToolUse", "pre").length, 1);
+  assert.equal(budgetCommands(parsedInstalled, "PostToolUse", "post").length, 1);
+  assert.equal(budgetCommands(parsedInstalled, "Stop", "stop").length, 1);
   assert.match(installed, /command = "\/Users\/example\/budget-guard-dashboard\/notify\.sh"/);
   assert.match(installed, /command = "\/home\/me\/my_budget_guard\.sh check"/);
   assert.match(installed, /mention budget_guard\.sh in body/);
@@ -265,13 +283,53 @@ test("codex installer recognizes single-quoted managed TOML hooks", async () => 
   };
   await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
 
-  const installed = await readFile(configPath, "utf8");
-  assert.equal((installed.match(/budget_guard\.sh codex pre/g) || []).length, 1);
-  assert.equal((installed.match(/budget_guard\.sh codex post/g) || []).length, 1);
+  const installed = await readToml(configPath);
+  assert.equal(budgetCommands(installed, "PreToolUse", "pre").length, 1);
+  assert.equal(budgetCommands(installed, "PostToolUse", "post").length, 1);
 
   await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
   const uninstalled = await readFile(configPath, "utf8");
   assert.doesNotMatch(uninstalled, /budget_guard\.sh codex/);
+});
+
+test("codex installer quotes managed hook commands when HOME contains spaces", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "budget codex space home "));
+  const fakeBin = resolve(home, "fake-bin");
+  await mkdir(fakeBin, { recursive: true });
+  await writeFile(resolve(fakeBin, "npm"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+
+  const codexDir = resolve(home, ".codex");
+  await mkdir(codexDir, { recursive: true });
+  const configPath = resolve(codexDir, "config.toml");
+  await writeFile(configPath, [
+    "[hooks]",
+    'PreToolUse = [{ matcher = "^Read$", hooks = [{ type = "command", command = "/Users/example/notify.sh", timeout = 9 }] }]'
+  ].join("\n") + "\n");
+
+  const env = {
+    ...process.env,
+    HOME: home,
+    PATH: `${fakeBin}:${process.env.PATH}`,
+    BUDGET_MCP_TOOL_TIMEOUT_SEC: "18000"
+  };
+  await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
+  await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
+
+  const parsed = await readToml(configPath);
+  const guard = resolve(home, ".budget-guard", "bin", "budget_guard.sh");
+  const preCommands = budgetCommands(parsed, "PreToolUse", "pre");
+  const stopCommands = budgetCommands(parsed, "Stop", "stop");
+  assert.deepEqual(preCommands, [`"${guard}" codex pre`]);
+  assert.deepEqual(stopCommands, [`"${guard}" codex stop`]);
+  assert.equal(await firstShellArg(preCommands[0]), guard);
+  assert.equal(await firstShellArg(stopCommands[0]), guard);
+  assert.match(hookCommands(parsed, "PreToolUse").join("\n"), /\/Users\/example\/notify\.sh/);
+
+  await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
+  const uninstalled = await readToml(configPath);
+  assert.deepEqual(budgetCommands(uninstalled, "PreToolUse", "pre"), []);
+  assert.deepEqual(budgetCommands(uninstalled, "Stop", "stop"), []);
+  assert.match(hookCommands(uninstalled, "PreToolUse").join("\n"), /\/Users\/example\/notify\.sh/);
 });
 
 test("codex installer preserves free text after hooks header across repeated installs", async () => {
@@ -763,7 +821,7 @@ test("codex installer removes only managed nested TOML hooks inside shared hook 
   await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
   const installed = await readFile(configPath, "utf8");
   assert.match(installed, /command = "\/Users\/example\/user-hook\.sh"/);
-  assert.equal((installed.match(/budget_guard\.sh codex pre/g) || []).length, 1);
+  assert.equal(budgetCommands(await readToml(configPath), "PreToolUse", "pre").length, 1);
 
   await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
   const uninstalled = await readFile(configPath, "utf8");
@@ -800,8 +858,8 @@ test("codex installer recognizes quoted TOML hook table headers", async () => {
     BUDGET_MCP_TOOL_TIMEOUT_SEC: "18000"
   };
   await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
-  const installed = await readFile(configPath, "utf8");
-  assert.equal((installed.match(/budget_guard\.sh codex pre/g) || []).length, 1);
+  const installed = await readToml(configPath);
+  assert.equal(budgetCommands(installed, "PreToolUse", "pre").length, 1);
 
   await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
   const uninstalled = await readFile(configPath, "utf8");
@@ -925,8 +983,7 @@ test("codex installer recognizes TOML table headers with trailing comments", asy
   };
   await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
   const installed = await readFile(configPath, "utf8");
-  await readToml(configPath);
-  assert.equal((installed.match(/budget_guard\.sh codex pre/g) || []).length, 1);
+  assert.equal(budgetCommands(await readToml(configPath), "PreToolUse", "pre").length, 1);
   assert.equal((installed.match(/\[mcp_servers\.budget-guard\]/g) || []).length, 1);
 
   await execFileAsync(resolve(root, "install.sh"), ["--uninstall"], { cwd: root, env, timeout: 20_000 });
@@ -958,10 +1015,7 @@ test("codex installer replaces managed inline hook arrays without invalid TOML",
   await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
   const parsed = await readToml(configPath);
   assert.match(parsed.hooks.PreToolUse[0].hooks[0].command, /notify\.sh/);
-  assert.equal(
-    parsed.hooks.PreToolUse.filter((entry) => entry.hooks?.some((hook) => /budget_guard\.sh codex pre/.test(hook.command))).length,
-    1
-  );
+  assert.equal(budgetCommands(parsed, "PreToolUse", "pre").length, 1);
 });
 
 test("codex installer is byte-symmetric when adding hooks to config without hooks", async () => {
