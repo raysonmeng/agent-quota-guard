@@ -39,8 +39,8 @@ function usage() {
   process.stdout.write(
     'usage: probe.mjs <agent> <probe|doctor> [--fixture <path>]\n' +
     '  agent: claude | codex\n' +
-    '  env:   BUDGET_USAGE_FIXTURE BUDGET_NOW_EPOCH BUDGET_CACHE_TTL\n' +
-    '         BUDGET_STATE_DIR BUDGET_WARN_ONCE BUDGET_WARN_REPEAT BUDGET_HARD\n');
+      '  env:   BUDGET_USAGE_FIXTURE BUDGET_NOW_EPOCH BUDGET_CACHE_TTL\n' +
+      '         BUDGET_STATE_DIR BUDGET_WARN_ONCE BUDGET_WARN_REPEAT BUDGET_CHECKPOINT_LEAD BUDGET_HARD\n');
 }
 
 async function main() {
@@ -64,7 +64,7 @@ async function main() {
   if (cmd === 'doctor') {
     const d = await doctor(agent);
     process.stdout.write(`doctor[${agent}]: ${d.code === 0 ? 'OK' : `EXIT=${d.code}`}\n`);
-    process.stdout.write(`  thresholds: warnOnce=${d.thresholds.warnOnce} warnRepeat=${d.thresholds.warnRepeat} hard=${d.thresholds.hard}\n`);
+      process.stdout.write(`  thresholds: warnOnce=${d.thresholds.warnOnce} warnRepeat=${d.thresholds.warnRepeat} checkpointLead=${d.thresholds.checkpointLead} hard=${d.thresholds.hard}\n`);
     for (const c of d.checks) {
       process.stdout.write(`  [${c.ok ? '+' : '-'}] ${c.name}: ${c.detail}\n`);
     }

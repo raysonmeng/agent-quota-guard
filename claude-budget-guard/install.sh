@@ -224,7 +224,8 @@ read -r -d '' RULES <<'BLOCK' || true
 - 平时无感,不要主动提额度。只在收到带「额度已用 X%」的提示时才理会。
 - T1 提醒(约 80%):本窗口提醒一次,确认目标能收束。
 - T2 提醒(约 90%):每次提醒时都收尾当前步,把进度写进 .agent/checkpoint.md。
-- T3 硬线(约 92%,减速提醒或循环轮末被停):收到提醒就写 .agent/checkpoint.md 收尾;轮末停下后不重试、不绕路。只做:① 确认 checkpoint 已写;② 若环境已配置 budget-guard MCP,调用 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
+- checkpoint 提醒线(约 95%):收到提醒就尽快把进度写进 .agent/checkpoint.md,给后续自动续接留足 lead。
+- T3 硬线(约 99%,最后保险丝;轮末被停或 provider rate-limit):收到提醒就写 .agent/checkpoint.md 收尾;轮末停下后不重试、不绕路。只做:① 确认 checkpoint 已写;② 若环境已配置 budget-guard MCP,调用 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
 - 开始 /goal /loop /batch 等长任务时会先收到额度预估(还能跑多久、何时刷新)。据此把目标切成 checkpoint 化小块,先做最关键的部分。
 - 新会话带「续接」提示时,从 checkpoint 的「下一步」继续,跳过「已完成」。
 
@@ -316,7 +317,7 @@ cat <<EOF
 完成。Claude Code 重开一个会话,/hooks 里应能看到 budget_guard。
 平时静默;接近额度才提示;/goal /loop 启动会给规划预估。
 
-可选:阈值  export BUDGET_WARN_ONCE=80 BUDGET_WARN_REPEAT=90 BUDGET_HARD=92
+可选:阈值  export BUDGET_WARN_ONCE=80 BUDGET_WARN_REPEAT=90 BUDGET_CHECKPOINT_LEAD=95 BUDGET_HARD=99
 可选:Codex usage 端点不涉及本包(纯 CC)。
 
 自动续跑(托管,默认关闭、有风险,确认权限后再开):

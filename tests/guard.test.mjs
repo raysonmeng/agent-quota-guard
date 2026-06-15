@@ -379,6 +379,16 @@ function makeClaudeFixture(dir, util) {
 }
 
 const TH = { warnOnce: 80, warnRepeat: 90, hard: 92 };
+const TH_V32 = { warnOnce: 80, warnRepeat: 90, checkpointLead: 95, hard: 99 };
+
+function readSinglePending(dir, agent = 'claude') {
+  const pendingFiles = readdirSync(join(dir, 'pending')).filter((f) => new RegExp(`^${agent}_.*\\.json$`).test(f));
+  assert.equal(pendingFiles.length, 1, 'scoped pending file written');
+  const scoped = JSON.parse(readFileSync(join(dir, 'pending', pendingFiles[0]), 'utf8'));
+  const legacy = JSON.parse(readFileSync(join(dir, `pending_${agent}.json`), 'utf8'));
+  assert.deepEqual(legacy, scoped, 'legacy pending mirrors scoped pending');
+  return scoped;
+}
 
 test('phasePost: util=79 → no message (below T1)', async () => {
   const dir = tempDir();
@@ -553,6 +563,75 @@ test('phasePre: hard reminder names the driving Codex usage window without denyi
     assert.match(msg, /触发窗口:rate_limit\.primary_window/);
     assert.match(msg, /rate_limit\.secondary_window=71%/);
     assert.match(msg, /不会强制拦截/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: checkpoint lead reminder fires below the 99 hard fuse without denying', async () => {
+  const dir = tempDir();
+  try {
+    const fx = makeClaudeFixture(dir, 95);
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: fx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePre('claude', { tool_name: 'Bash', tool_input: { command: 'true' } }, TH_V32),
+    );
+
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    const msg = result?.hookSpecificOutput?.additionalContext || '';
+    assert.match(msg, /checkpoint|收尾|进度写进/, 'lead reminder should explicitly ask for a checkpoint');
+    assert.match(msg, /95%/, 'lead reminder names the checkpoint lead');
+    assert.match(msg, /99%/, 'lead reminder keeps the hard fuse visible');
+    assert.match(msg, /不会强制拦截/, 'PreToolUse remains advisory');
+    assert.doesNotMatch(msg, /≥99% 硬线/, '95% lead must not pretend the 99% hard line has fired');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePost: checkpoint lead warns before the 99 hard fuse without threatening Stop', async () => {
+  const dir = tempDir();
+  try {
+    const fx = makeClaudeFixture(dir, 95);
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: fx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePost('claude', {}, TH_V32),
+    );
+
+    const msg = result?.hookSpecificOutput?.additionalContext || '';
+    assert.match(msg, /95%/, 'lead warning names the lead threshold');
+    assert.match(msg, /99%/, 'lead warning names the hard fuse');
+    assert.match(msg, /checkpoint|进度写进/, 'lead warning asks for checkpoint');
+    assert.doesNotMatch(msg, /Stop 钩子将强停/, 'below hard fuse must not claim Stop will force-stop');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePre: provider rate-limit writes normal pending and remains advisory', async () => {
+  const dir = tempDir();
+  try {
+    writeFileSync(join(dir, 'ratelimit_codex.json'), JSON.stringify({
+      rate_limited_until: NOW + 300,
+      recorded_at: NOW,
+      source: 'http_429',
+    }));
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePre('codex', { session_id: 's-rate-pre', tool_name: 'Bash', tool_input: { command: 'true' } }, TH_V32),
+    );
+
+    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
+    assert.match(result?.systemMessage || '', /限流|rate/i);
+    assert.match(result?.systemMessage || '', /checkpoint|续接|进度/);
+    const pending = readSinglePending(dir, 'codex');
+    assert.equal(pending.status, 'paused');
+    assert.equal(pending.agent, 'codex');
+    assert.equal(pending.session_id, 's-rate-pre');
+    assert.equal(pending.cwd, dir);
+    assert.equal(pending.reset_epoch, 0);
+    assert.equal(pending.util, 0);
+    assert.equal(pending.warn_util, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1253,6 +1332,67 @@ test('phaseStop: non-resettable warn_util>=hard → force stop (continue:false),
       assert.equal(pending.warn_util, 95);
       assert.equal(typeof pending.at, 'number');
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phaseStop: checkpoint lead below the 99 hard fuse does not force-stop or write pending', async () => {
+  const dir = tempDir();
+  try {
+    const fx = makeClaudeFixture(dir, 95);
+    const claudeResult = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_USAGE_FIXTURE: fx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phaseStop('claude', { session_id: 's-lead' }, TH_V32),
+    );
+    assert.equal(claudeResult, null, 'claude stop stays silent at checkpoint lead');
+    assert.equal(existsSync(join(dir, 'pending')), false, 'lead does not write pending');
+
+    const codexFx = join(dir, 'codex-lead.json');
+    writeFileSync(codexFx, JSON.stringify({
+      rate_limit: {
+        primary_window: { used_percent: 95, reset_at: NOW + 3600, limit_window_seconds: 18000, reset_after_seconds: 3600 },
+        secondary_window: { used_percent: 40, reset_at: NOW + 604800, limit_window_seconds: 604800, reset_after_seconds: 604800 },
+      },
+      additional_rate_limits: [],
+    }));
+    const codexResult = await withEnvAsync(
+      { BUDGET_STATE_DIR: join(dir, 'codex-state'), BUDGET_USAGE_FIXTURE: codexFx, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phaseStop('codex', { session_id: 's-lead' }, TH_V32),
+    );
+    assert.equal(codexResult?.continue, undefined, 'codex lead does not force-stop');
+    assert.match(codexResult?.systemMessage || '', /95%/);
+    assert.match(codexResult?.systemMessage || '', /checkpoint|收尾|进度/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phaseStop: provider rate-limit writes normal pending and force-stops before fail-open return', async () => {
+  const dir = tempDir();
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'ratelimit_claude.json'), JSON.stringify({
+      rate_limited_until: NOW + 300,
+      recorded_at: NOW,
+      source: 'http_429',
+    }));
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phaseStop('claude', { session_id: 's-rate' }, TH_V32),
+    );
+
+    assert.ok(result && result.continue === false, 'rate-limit stop must force-stop cleanly');
+    assert.match(result.stopReason || '', /限流|rate/i);
+    const pending = readSinglePending(dir, 'claude');
+    assert.equal(pending.status, 'paused');
+    assert.equal(pending.agent, 'claude');
+    assert.equal(pending.session_id, 's-rate');
+    assert.equal(pending.cwd, dir);
+    assert.equal(pending.reset_epoch, 0);
+    assert.equal(pending.util, 0);
+    assert.equal(pending.warn_util, 0);
+    assert.equal(typeof pending.at, 'number');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

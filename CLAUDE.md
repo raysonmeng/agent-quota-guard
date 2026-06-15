@@ -29,21 +29,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | phase | 挂载事件 | 行为 |
 |---|---|---|
 | `prompt` | UserPromptSubmit | 检测 `/goal /loop /batch /background`,给规划预估(额度充足时出声的主要情形);另外检测**显式跳过短语**(`/budget-skip`/`force-continue`/`跳过硬线`/`强制继续`),命中则写限时 skip marker(不查用量) |
-| `pre` | PreToolUse | 硬线/可信 runway 收尾保护线只发减速提醒,不 deny;checkpoint 写入与 **skip marker 有效** 时静默放行 |
-| `post` | PostToolUse | 追加一条 burn-rate 历史点;软线提示收尾(skip 有效时 T3 提示改为「不强停」措辞,且不消耗真实 T3 fingerprint) |
-| `stop` | Stop/SubagentStop | 循环轮末重估;硬线 `continue:false` 强停 + 写 `pending/<agent>_<scope>.json` 给 watchdog;**skip marker 有效则不强停、不写 pending** |
+| `pre` | PreToolUse | checkpoint 提醒线/硬线/可信 runway 收尾保护线只发减速提醒,不 deny;checkpoint 写入与 **skip marker 有效** 时静默放行 |
+| `post` | PostToolUse | 追加一条 burn-rate 历史点;软线/提前 checkpoint 提示收尾(skip 有效时 T3 提示改为「不强停」措辞,且不消耗真实 T3 fingerprint) |
+| `stop` | Stop/SubagentStop | 循环轮末重估;硬线或 provider rate-limit `continue:false` 强停 + 写 `pending/<agent>_<scope>.json` 给 watchdog;**skip marker 有效则不强停、不写 pending** |
 | `resume` | SessionStart | 有上次 checkpoint 就注入上下文续接 |
 
 **核心不变量(改代码别破坏):**
 - **fail-open**:查不到用量(网络/token/字段对不上/无 `jq`)一律 `exit 0` 静默放行。绝不因守卫自身问题卡死 agent。
 - **统一走 `exit 0 + JSON`**,从不混用 `exit 2`。输出协议见 README §10。
 - **静默优先**:`util < WARN_ONCE` 时除长任务预估和可信 runway 收尾保护线外一个字不冒。
-- **硬线只在轮末停**(`stop` phase),`pre` 只提醒不拦工具——避免执行中途切。
+- **硬线只在轮末停**(`stop` phase),`pre` 只提醒不拦工具——避免执行中途切。默认硬线是 99%,作为外层超限保险丝;默认 checkpoint 提醒线约 95%,用于给 agent 留足写 checkpoint 的 lead。
 - **手动跳过(override)只能延后干净停止,绝不绕过限额**:仅显式短语在 `prompt` phase 触发,写限时(`BUDGET_SKIP_TTL`,默认 1800s)、按项目作用域的 marker;`pre`/`stop` 在硬线时若 marker 有效则放行/不强停,到期自动恢复。所有错误路径 fail-safe 朝「无 skip → 继续提醒并在轮末干净停」(坏 marker = 当作过期)。`BUDGET_SKIP_TTL` 是 env-only(**不**在配置文件 ALLOWLIST 内),防止仓库内 `.budget-guard.conf` 偷偷拉长跳过时长。Bash 双包行为保持逐字节一致;Node hook 额外消费 probe v2 的可信 runway 字段,Bash guard 暂只走静态硬线提醒。
 
 **数据流 / 状态目录**(默认 `~/.budget-guard/`,`BUDGET_STATE_DIR` 可覆盖):
 - `usage_<agent>.json` —— 用量缓存(`BUDGET_CACHE_TTL` 秒,默认 45;PreToolUse 每次工具调用都跑,必须缓存)。
-- `pending/<agent>_<scope>.json` —— 硬线暂停时写的待续队列,watchdog 逐个读它续跑;旧 `pending_<agent>.json` 仅 watchdog 兼容读取。
+- `pending/<agent>_<scope>.json` —— 硬线暂停或 provider rate-limit 时写的待续队列,watchdog/bridge 逐个读它续跑;旧 `pending_<agent>.json` 仅 watchdog 兼容读取。
 - `skip/<agent>_<scope>.json` —— 手动跳过硬线的限时授权 marker(`{"expires":<epoch>}`);`pre`/`stop` 读它判断是否放行,过期自动清理。
 
 > `hist_<agent>.jsonl`(burn-rate 历史点)仅 Bash 实现(`budget_guard.sh`)写入。Node lib 不写,watchdog 不读。burn-rate 算法是 Bash 专属(`seconds_to_hard()`,纯 awk);Node lib 不实现(P2 待办)。
@@ -86,7 +86,7 @@ diff claude-budget-guard/watchdog.sh    codex-budget-guard/watchdog.sh
 ## 编码风格与命名
 
 - 一律 `#!/usr/bin/env bash`。安装器用 `set -euo pipefail`(快速失败);运行期 guard 用 `set -uo pipefail`(去掉 `-e`,因为大量命令以 `|| true` 兜底实现 fail-open,绝不能因单条失败退出)。
-- 配置变量全大写并统一 `BUDGET_` 前缀(`BUDGET_WARN_ONCE` `BUDGET_WARN_REPEAT` `BUDGET_HARD` `BUDGET_STATE_DIR` …),全部可被环境变量覆盖、带默认值。`BUDGET_SOFT` 仅作为 `WARN_REPEAT` 的 deprecated alias。
+- 配置变量全大写并统一 `BUDGET_` 前缀(`BUDGET_WARN_ONCE` `BUDGET_WARN_REPEAT` `BUDGET_CHECKPOINT_LEAD` `BUDGET_HARD` `BUDGET_STATE_DIR` …),全部可被环境变量覆盖、带默认值。`BUDGET_SOFT` 仅作为 `WARN_REPEAT` 的 deprecated alias。
 - 函数小而动词化:`fetch_usage` `record_point` `seconds_to_hard` `fmt_clock` `fmt_dur`。
 - 面向用户的文案是**中文**——除非有意改产品语言,否则保持中文,别擅自英化。
 

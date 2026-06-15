@@ -1215,7 +1215,8 @@ read -r -d '' RULES <<'BLOCK' || true
 - 软线提示(约 78%):收尾当前步,把进度写进 .agent/checkpoint.md。
 - T1 提醒(约 80%):本窗口提醒一次,确认目标能收束。
 - T2 提醒(约 90%):每次提醒时都收尾当前步,把进度写进 .agent/checkpoint.md。
-- T3 硬线(约 92%,减速提醒或循环轮末被停):收到提醒就写 .agent/checkpoint.md 收尾;轮末停下后不重试、不绕路。只做:① 确认 checkpoint 已写;② 若可用,调用 budget-guard MCP 的 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
+- checkpoint 提醒线(约 95%):收到提醒就尽快把进度写进 .agent/checkpoint.md,给后续自动续接留足 lead。
+- T3 硬线(约 99%,最后保险丝;轮末被停或 provider rate-limit):收到提醒就写 .agent/checkpoint.md 收尾;轮末停下后不重试、不绕路。只做:① 确认 checkpoint 已写;② 若可用,调用 budget-guard MCP 的 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
 - 开始 /goal 等长任务时会先收到额度预估(还能跑多久、何时刷新)。据此把目标切成 checkpoint 化小块,先做最关键的部分。
 - 新会话带「续接」提示时,从 checkpoint 的「下一步」继续,跳过「已完成」。
 
@@ -1311,7 +1312,7 @@ MCP server 已注册为 budget-guard;运行 codex mcp get budget-guard 确认 to
      如有自定义 ChatGPT base,在 ~/.codex/config.toml 设置 chatgpt_base_url。
   2. Codex hooks 写入 ~/.codex/config.toml 的 [hooks]/[[hooks.*]] TOML 结构;
      已知 codex exec 0.135.0 不触发 lifecycle hooks,交互 TUI 用 /hooks 验证。
-  3. 阈值:export BUDGET_WARN_ONCE=80 BUDGET_WARN_REPEAT=90 BUDGET_HARD=92
+  3. 阈值:export BUDGET_WARN_ONCE=80 BUDGET_WARN_REPEAT=90 BUDGET_CHECKPOINT_LEAD=95 BUDGET_HARD=99
      BUDGET_SOFT 仍作为 WARN_REPEAT 的 deprecated alias。
   4. MCP 长阻塞:Codex 默认 tool_timeout_sec=120s,本安装器只给 budget-guard server
      配长超时。可用 BUDGET_MCP_TOOL_TIMEOUT_SEC 覆盖(默认 $MCP_TIMEOUT_SEC 秒)。

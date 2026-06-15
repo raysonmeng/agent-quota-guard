@@ -142,17 +142,34 @@ test('checkThresholds: defaults when no env set', () => {
   assert.equal(r.ok, true);
   assert.equal(r.warnOnce, 80);
   assert.equal(r.warnRepeat, 90);
-  assert.equal(r.hard, 92);
+  assert.equal(r.checkpointLead, 95);
+  assert.equal(r.hard, 99);
   assert.equal(r.errors.length, 0);
 });
 
 test('checkThresholds: 0 <= warnOnce < warnRepeat < hard <= 100 valid', () => {
-  const r = checkThresholds({ BUDGET_WARN_ONCE: '75', BUDGET_WARN_REPEAT: '85', BUDGET_HARD: '95' });
+  const r = checkThresholds({
+    BUDGET_WARN_ONCE: '75',
+    BUDGET_WARN_REPEAT: '85',
+    BUDGET_CHECKPOINT_LEAD: '94',
+    BUDGET_HARD: '99',
+  });
   assert.equal(r.ok, true);
   assert.equal(r.warnOnce, 75);
   assert.equal(r.warnRepeat, 85);
-  assert.equal(r.hard, 95);
+  assert.equal(r.checkpointLead, 94);
+  assert.equal(r.hard, 99);
   assert.equal(r.errors.length, 0);
+});
+
+test('checkThresholds: checkpointLead default clamps below a custom hard line', () => {
+  const r = checkThresholds({ BUDGET_WARN_ONCE: '80', BUDGET_WARN_REPEAT: '90', BUDGET_HARD: '92' });
+  assert.equal(r.ok, true);
+  assert.equal(r.warnOnce, 80);
+  assert.equal(r.warnRepeat, 90);
+  assert.equal(r.checkpointLead, 91);
+  assert.equal(r.hard, 92);
+  assert.equal(r.sources.checkpointLead, 'default');
 });
 
 test('checkThresholds: warnOnce >= warnRepeat → invalid, falls back to defaults', () => {
@@ -162,13 +179,34 @@ test('checkThresholds: warnOnce >= warnRepeat → invalid, falls back to default
   // falls back to defaults
   assert.equal(r.warnOnce, 80);
   assert.equal(r.warnRepeat, 90);
-  assert.equal(r.hard, 92);
+  assert.equal(r.checkpointLead, 95);
+  assert.equal(r.hard, 99);
 });
 
 test('checkThresholds: warnRepeat >= hard → invalid', () => {
   const r = checkThresholds({ BUDGET_WARN_ONCE: '80', BUDGET_WARN_REPEAT: '95', BUDGET_HARD: '92' });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some(e => e.includes('warnRepeat')));
+});
+
+test('checkThresholds: warnRepeat <= checkpointLead < hard is enforced', () => {
+  const tooLow = checkThresholds({
+    BUDGET_WARN_ONCE: '80',
+    BUDGET_WARN_REPEAT: '90',
+    BUDGET_CHECKPOINT_LEAD: '89',
+    BUDGET_HARD: '99',
+  });
+  assert.equal(tooLow.ok, false);
+  assert.ok(tooLow.errors.some(e => e.includes('checkpointLead')));
+
+  const atHard = checkThresholds({
+    BUDGET_WARN_ONCE: '80',
+    BUDGET_WARN_REPEAT: '90',
+    BUDGET_CHECKPOINT_LEAD: '99',
+    BUDGET_HARD: '99',
+  });
+  assert.equal(atHard.ok, false);
+  assert.ok(atHard.errors.some(e => e.includes('checkpointLead')));
 });
 
 test('checkThresholds: hard > 100 → invalid', () => {
@@ -181,6 +219,7 @@ test('checkThresholds: BUDGET_SOFT alias for warnRepeat', () => {
   const r = checkThresholds({ BUDGET_WARN_ONCE: '70', BUDGET_SOFT: '85', BUDGET_HARD: '92' });
   assert.equal(r.ok, true);
   assert.equal(r.warnRepeat, 85);
+  assert.equal(r.checkpointLead, 91);
   assert.equal(r.sources.warnRepeat, 'BUDGET_SOFT_alias');
 });
 
@@ -200,17 +239,19 @@ test('checkThresholds: non-integer value → invalid, falls back to defaults', (
   const r = checkThresholds({ BUDGET_WARN_ONCE: 'abc', BUDGET_WARN_REPEAT: '90', BUDGET_HARD: '92' });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some(e => e.includes('warnOnce') && e.includes('abc')));
+  assert.equal(r.checkpointLead, 95);
+  assert.equal(r.hard, 99);
 });
 
 test('checkThresholds: numeric prefixes are invalid, not partially parsed', () => {
   const inline = checkThresholds({ BUDGET_WARN_ONCE: '80', BUDGET_WARN_REPEAT: '90', BUDGET_HARD: '95 # inline' });
   assert.equal(inline.ok, false);
-  assert.equal(inline.hard, 92);
+  assert.equal(inline.hard, 99);
   assert.ok(inline.errors.some(e => e.includes('hard') && e.includes('95 # inline')));
 
   const suffix = checkThresholds({ BUDGET_WARN_ONCE: '80', BUDGET_WARN_REPEAT: '90', BUDGET_HARD: '95x' });
   assert.equal(suffix.ok, false);
-  assert.equal(suffix.hard, 92);
+  assert.equal(suffix.hard, 99);
   assert.ok(suffix.errors.some(e => e.includes('hard') && e.includes('95x')));
 });
 
@@ -219,7 +260,8 @@ test('checkThresholds: empty string values → treated as default', () => {
   assert.equal(r.ok, true);
   assert.equal(r.warnOnce, 80);
   assert.equal(r.warnRepeat, 90);
-  assert.equal(r.hard, 92);
+  assert.equal(r.checkpointLead, 95);
+  assert.equal(r.hard, 99);
 });
 
 test('checkThresholds: warnOnce=0 is valid (>= 0)', () => {
