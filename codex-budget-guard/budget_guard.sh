@@ -330,16 +330,27 @@ read -r UTIL RESET BUCKET_ID BUCKETS_SUMMARY RATE_LIMITED_UNTIL <<<"$(fetch_usag
 if [[ "$PHASE" == "prompt" ]]; then
   text=$(printf '%s' "$INPUT" | jq -r '.prompt // .user_prompt // .tool_input.prompt // empty' 2>/dev/null || true)
   if printf '%s' "$text" | grep -Eq '(^|[[:space:]])/(goal|loop|batch|background)([[:space:]]|$)'; then
-    record_point "$UTIL"
-    secs=$(seconds_to_hard "$UTIL")
-    est="按当前剩余额度(已用 ${UTIL}%),"
-    if (( secs >= 0 )); then est+="以最近的消耗速率估算大约还能自主跑 $(fmt_dur "$secs")"; else est+="额度宽裕"; fi
-    est+="。额度刷新时间 $(fmt_clock "$RESET")。建议把目标切成能在该时长内完成的小块,每块结束写一次 ${CHECKPOINT};若可能超时,先做最关键的部分。"
-    if [[ "$AGENT" == "claude" ]]; then
-      jq -n --arg c "$est" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
+    if rate_limited_active; then
+      write_pending
+      rl_note="$(rate_limit_note)"
+      if [[ "$AGENT" == "claude" ]]; then
+        jq -n --arg c "$rl_note" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
+      else
+        # Codex:用 systemMessage 给用户看(其 UserPromptSubmit 注入 agent 的能力按版本而定)
+        jq -n --arg m "$rl_note" '{systemMessage:$m}'
+      fi
     else
-      # Codex:用 systemMessage 给用户看(其 UserPromptSubmit 注入 agent 的能力按版本而定)
-      jq -n --arg m "[额度预估] $est" '{systemMessage:$m}'
+      record_point "$UTIL"
+      secs=$(seconds_to_hard "$UTIL")
+      est="按当前剩余额度(已用 ${UTIL}%),"
+      if (( secs >= 0 )); then est+="以最近的消耗速率估算大约还能自主跑 $(fmt_dur "$secs")"; else est+="额度宽裕"; fi
+      est+="。额度刷新时间 $(fmt_clock "$RESET")。建议把目标切成能在该时长内完成的小块,每块结束写一次 ${CHECKPOINT};若可能超时,先做最关键的部分。"
+      if [[ "$AGENT" == "claude" ]]; then
+        jq -n --arg c "$est" '{hookSpecificOutput:{hookEventName:"UserPromptSubmit", additionalContext:$c}}'
+      else
+        # Codex:用 systemMessage 给用户看(其 UserPromptSubmit 注入 agent 的能力按版本而定)
+        jq -n --arg m "[额度预估] $est" '{systemMessage:$m}'
+      fi
     fi
   fi
   exit 0

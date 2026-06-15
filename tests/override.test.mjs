@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
-  existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync,
+  existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -84,6 +84,35 @@ function makeCodexHardFixture(dir, usedPercent) {
   return path;
 }
 
+function writeActiveRateLimit(dir, agent, until = NOW + 300) {
+  writeFileSync(join(dir, `ratelimit_${agent}.json`), JSON.stringify({
+    rate_limited_until: until,
+    recorded_at: NOW,
+    source: 'http_429',
+  }));
+}
+
+function writeStaleClaudeCache(dir, util = 95) {
+  writeFileSync(join(dir, 'usage_claude.json'), JSON.stringify({
+    fetched_at: NOW - 60,
+    cap_util: util,
+    raw: {
+      five_hour: {
+        utilization: util,
+        resets_at: new Date((NOW + 3600) * 1000).toISOString(),
+      },
+    },
+  }));
+}
+
+function readPendingPair(stateDir, agent) {
+  const scopedName = readdirSync(join(stateDir, 'pending')).find((f) => new RegExp(`^${agent}_.*\\.json$`).test(f));
+  assert.ok(scopedName, `scoped pending for ${agent} should exist`);
+  const scoped = JSON.parse(readFileSync(join(stateDir, 'pending', scopedName), 'utf8'));
+  const legacy = JSON.parse(readFileSync(join(stateDir, `pending_${agent}.json`), 'utf8'));
+  return { scoped, legacy };
+}
+
 const BASH_INPUT = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } });
 
 // ─── Node: phasePrompt grant semantics ────────────────────────────────────
@@ -144,6 +173,64 @@ test('Node phasePrompt: codex override grant uses systemMessage', async () => {
     );
     assert.match(res?.systemMessage || '', /手动跳过授权/);
     assert.ok(existsSync(nodeSkipMarker(dir, 'codex', dir)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Node phasePrompt: long prompt during active rate-limit writes pending instead of a healthy estimate', async () => {
+  const dir = tempDir();
+  try {
+    writeStaleClaudeCache(dir, 95);
+    writeActiveRateLimit(dir, 'claude');
+    const res = await withEnvAsync(
+      {
+        BUDGET_STATE_DIR: dir,
+        BUDGET_CWD_OVERRIDE: dir,
+        BUDGET_NOW_EPOCH: String(NOW),
+        BUDGET_CACHE_TTL: '1',
+        BUDGET_NO_TOKEN_DISCOVERY: '1',
+      },
+      () => phasePrompt('claude', { prompt: '/goal 长任务', session_id: 's-prompt-rate' }, TH),
+    );
+
+    const ctx = res?.hookSpecificOutput?.additionalContext || '';
+    assert.match(ctx, /限流|rate-limit/i, 'long prompt surfaces active provider rate-limit');
+    assert.match(ctx, /pending|续接|checkpoint/i, 'long prompt explains pending-based resume');
+    assert.doesNotMatch(ctx, /已用 0%/, 'must not render a fabricated 0% estimate');
+    assert.doesNotMatch(ctx, /额度宽裕/, 'must not claim budget is healthy while rate-limited');
+
+    const { scoped, legacy } = readPendingPair(dir, 'claude');
+    assert.deepEqual(legacy, scoped);
+    assert.equal(scoped.status, 'paused');
+    assert.equal(scoped.agent, 'claude');
+    assert.equal(scoped.session_id, 's-prompt-rate');
+    assert.equal(scoped.cwd, dir);
+    assert.equal(scoped.reset_epoch, NOW + 3600);
+    assert.equal(scoped.util, 95);
+    assert.equal(scoped.warn_util, 95);
+    assert.equal(typeof scoped.at, 'number');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Node phasePrompt: short prompt during active rate-limit stays silent and does not write pending', async () => {
+  const dir = tempDir();
+  try {
+    writeActiveRateLimit(dir, 'claude');
+    const res = await withEnvAsync(
+      {
+        BUDGET_STATE_DIR: dir,
+        BUDGET_CWD_OVERRIDE: dir,
+        BUDGET_NOW_EPOCH: String(NOW),
+        BUDGET_NO_TOKEN_DISCOVERY: '1',
+      },
+      () => phasePrompt('claude', { prompt: '继续', session_id: 's-short-rate' }, TH),
+    );
+    assert.equal(res, null, 'non-long prompt should not surface rate-limit context');
+    assert.equal(existsSync(join(dir, 'pending')), false, 'non-long prompt should not write pending');
+    assert.equal(existsSync(join(dir, 'pending_claude.json')), false, 'non-long prompt should not write legacy pending');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -514,6 +601,66 @@ test('Bash stale cache with active rate-limit still writes pending instead of tr
     const pending = JSON.parse(await readFile(join(state, 'pending', bashScopedName), 'utf8'));
     assert.equal(pending.session_id, 's-stale-rate');
     assert.equal(pending.status, 'paused');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Bash prompt: long prompt during active rate-limit writes pending and suppresses healthy estimate', async () => {
+  const { root, state, proj } = await bashScratch();
+  try {
+    const staleRateProbe = join(root, 'prompt-stale-rate-probe');
+    await writeFile(
+      staleRateProbe,
+      ['#!/usr/bin/env bash', 'printf \'{"ok":true,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":95,"warn_util":95,"reset_epoch":1748853600}\\n\''].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: staleRateProbe };
+    const prompt = await runBash([guardPath, 'claude', 'prompt'], {
+      cwd: proj,
+      env,
+      input: JSON.stringify({ prompt: '/goal 长任务', session_id: 's-bash-prompt-rate' }),
+    });
+    assert.equal(prompt.code, 0, `prompt stderr=${prompt.stderr}`);
+    assert.match(prompt.stdout, /限流|rate-limit/i, 'long prompt surfaces active provider rate-limit');
+    assert.match(prompt.stdout, /pending|续接|checkpoint/i, 'long prompt explains pending-based resume');
+    assert.doesNotMatch(prompt.stdout, /已用 0%/, 'must not render a fabricated 0% estimate');
+    assert.doesNotMatch(prompt.stdout, /额度宽裕/, 'must not claim budget is healthy while rate-limited');
+
+    const { scoped, legacy } = readPendingPair(state, 'claude');
+    assert.deepEqual(legacy, scoped);
+    assert.equal(scoped.status, 'paused');
+    assert.equal(scoped.agent, 'claude');
+    assert.equal(scoped.session_id, 's-bash-prompt-rate');
+    assert.equal(realpathSync(scoped.cwd), realpathSync(proj));
+    assert.equal(scoped.reset_epoch, 0);
+    assert.equal(scoped.util, 0);
+    assert.equal(scoped.warn_util, 0);
+    assert.equal(typeof scoped.at, 'number');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Bash prompt: short prompt during active rate-limit stays silent and does not write pending', async () => {
+  const { root, state, proj } = await bashScratch();
+  try {
+    const rateProbe = join(root, 'prompt-short-rate-probe');
+    await writeFile(
+      rateProbe,
+      ['#!/usr/bin/env bash', 'printf \'{"ok":false,"error":"rate_limited","rate_limited_until":9999999999,"util":0,"warn_util":0,"reset_epoch":0}\\n\''].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: rateProbe };
+    const prompt = await runBash([guardPath, 'claude', 'prompt'], {
+      cwd: proj,
+      env,
+      input: JSON.stringify({ prompt: '继续', session_id: 's-bash-short-rate' }),
+    });
+    assert.equal(prompt.code, 0, `prompt stderr=${prompt.stderr}`);
+    assert.equal(prompt.stdout.trim(), '', 'non-long prompt should stay silent');
+    assert.equal(existsSync(join(state, 'pending')), false, 'non-long prompt should not write pending');
+    assert.equal(existsSync(join(state, 'pending_claude.json')), false, 'non-long prompt should not write legacy pending');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
