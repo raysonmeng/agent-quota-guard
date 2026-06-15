@@ -97,7 +97,7 @@ Sometimes you're a few steps from done and would rather push through than stop a
 
 This records a **time-boxed** (default 30 min, `BUDGET_SKIP_TTL`), **per-project** grant: while it's valid the hard line won't emit PreToolUse slowdown reminders or force a round-end stop. It auto-expires and the guard then resumes normal reminders plus clean round-end stops. A plain "continue" never triggers it — the phrase must be explicit. This only delays a *clean* stop; it **cannot** create quota — once the API refuses requests, nothing keeps the agent running.
 
-If you also run AgentBridge's budget pacing, Bridge is the primary policy (it paces toward ~98%). This guard is the outer safety fuse: it still warns early enough for checkpointing and parks at ~99% or on provider 429/rate-limit.
+If you also run AgentBridge's budget pacing, Bridge is the primary policy (it paces toward ~98%). This guard is the outer safety fuse: it still warns early enough for checkpointing and parks at ~99% **utilization**. A transient provider 429/rate-limit only gates the probe refresh (it falls back to the cached utilization) — it is NOT a quota stop and never parks or writes a pending on its own.
 
 ---
 
@@ -314,7 +314,7 @@ cd agent-quota-guard
 
 这会记录一个**限时**(默认 30 分钟,由 `BUDGET_SKIP_TTL` 控制)、**按项目作用域**的授权:有效期内硬线不再发 PreToolUse 减速提醒、也不在轮末强停;到期自动恢复正常提醒与轮末干净停。普通的「继续」**不会**触发 —— 短语必须显式。它只是延后一次*干净*的停止,**并不能**凭空变出额度 —— API 一旦拒绝请求,谁也没法让 agent 继续跑。
 
-如果你同时使用 AgentBridge 的预算 pacing,Bridge 才是主策略(目标约 98%)。本 guard 是外层保险丝:仍会在 ~95% 提前催 checkpoint,并在 ~99% 或供应商 429/rate-limit 时写 pending 干净停下。
+如果你同时使用 AgentBridge 的预算 pacing,Bridge 才是主策略(目标约 98%)。本 guard 是外层保险丝:仍会在 ~95% 提前催 checkpoint,并在 ~99% **util** 写 pending 干净停下。供应商 429/rate-limit 只是临时限流探针刷新(回退到缓存 util 判定),**不是额度耗尽,不会单独停机或写 pending**。
 
 ---
 

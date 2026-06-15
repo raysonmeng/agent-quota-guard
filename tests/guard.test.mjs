@@ -608,30 +608,130 @@ test('phasePost: checkpoint lead warns before the 99 hard fuse without threateni
   }
 });
 
-test('phasePre: provider rate-limit writes normal pending and remains advisory', async () => {
+// ─── transient probe 429 is NOT quota exhaustion (root-cause regression) ────
+// A probe HTTP 429 + Retry-After only gates PROBE FRESHNESS; it must never write
+// a handoff pending, force a stop, or emit quota-exhaustion language. Threshold
+// actions run on the stale CACHED util. (Mirror of the bash guard's behavior.)
+
+function writeGate(dir, agent, until = NOW + 300) {
+  writeFileSync(join(dir, `ratelimit_${agent}.json`), JSON.stringify({
+    rate_limited_until: until, recorded_at: NOW, source: 'http_429',
+  }));
+}
+// Cache with fetched_at far in the past so the 45s TTL is exceeded and fetchUsage
+// takes the 429-gate STALE-cache path (not the fresh cache-hit path).
+function writeStaleCache(dir, agent, util) {
+  const resetsAt = new Date((NOW + 3600) * 1000).toISOString();
+  writeFileSync(join(dir, `usage_${agent}.json`), JSON.stringify({
+    fetched_at: NOW - 100000,
+    raw: { five_hour: { utilization: util, resets_at: resetsAt } },
+  }));
+}
+function pendingDirEmpty(dir) {
+  try { return readdirSync(join(dir, 'pending')).length === 0; } catch (_) { return true; }
+}
+
+test('phasePre: pure transient 429 (no cache) → fail-open silent, NO pending', async () => {
   const dir = tempDir();
   try {
-    writeFileSync(join(dir, 'ratelimit_codex.json'), JSON.stringify({
-      rate_limited_until: NOW + 300,
-      recorded_at: NOW,
-      source: 'http_429',
-    }));
+    writeGate(dir, 'codex');
     const result = await withEnvAsync(
       { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
       () => phasePre('codex', { session_id: 's-rate-pre', tool_name: 'Bash', tool_input: { command: 'true' } }, TH_V32),
     );
+    assert.equal(result, null, 'gated with no cache → no data → silent, never a quota-exhaustion message');
+    assert.ok(pendingDirEmpty(dir), 'a transient 429 must NOT write a handoff pending');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-    assert.equal(result?.hookSpecificOutput?.permissionDecision, undefined);
-    assert.match(result?.systemMessage || '', /限流|rate/i);
-    assert.match(result?.systemMessage || '', /checkpoint|续接|进度/);
-    const pending = readSinglePending(dir, 'codex');
-    assert.equal(pending.status, 'paused');
-    assert.equal(pending.agent, 'codex');
-    assert.equal(pending.session_id, 's-rate-pre');
-    assert.equal(pending.cwd, dir);
-    assert.equal(pending.reset_epoch, 0);
-    assert.equal(pending.util, 0);
-    assert.equal(pending.warn_util, 0);
+test('phaseStop: pure transient 429 (no cache) does NOT force stop', async () => {
+  const dir = tempDir();
+  try {
+    writeGate(dir, 'claude');
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phaseStop('claude', {}, TH_V32),
+    );
+    assert.equal(result, null, 'transient 429 must NEVER continue:false');
+    assert.ok(pendingDirEmpty(dir), 'no pending on transient 429');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phaseStop: 429 + healthy stale cache (util 50) → no stop, no pending', async () => {
+  const dir = tempDir();
+  try {
+    writeGate(dir, 'claude');
+    writeStaleCache(dir, 'claude', 50);
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phaseStop('claude', {}, TH_V32),
+    );
+    assert.equal(result, null, 'healthy cached util under a gate → never stop (this was the false-stop bug)');
+    assert.ok(pendingDirEmpty(dir));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phaseStop: 429 + HARD stale cache (util ≥ hard) → genuine util-driven stop', async () => {
+  const dir = tempDir();
+  try {
+    writeGate(dir, 'claude');
+    writeStaleCache(dir, 'claude', 99); // ≥ hard 99
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phaseStop('claude', {}, TH_V32),
+    );
+    assert.equal(result?.continue, false, 'genuine util≥hard still hard-stops, even under a gate');
+    assert.match(result?.stopReason || '', /硬线/);
+    assert.ok(!pendingDirEmpty(dir), 'genuine hard stop writes pending');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePost: 429 + near-hard stale cache → warns WITH non-imperative stale note', async () => {
+  const dir = tempDir();
+  try {
+    writeGate(dir, 'claude');
+    writeStaleCache(dir, 'claude', 96); // ≥ checkpointLead 95, < hard 99
+    const result = await withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePost('claude', {}, TH_V32),
+    );
+    const msg = result?.hookSpecificOutput?.additionalContext || '';
+    assert.match(msg, /checkpoint 提醒线|96%/, 'threshold message still fires on the stale util');
+    assert.match(msg, /探针暂被限流/, 'carries the non-imperative stale-probe note');
+    assert.doesNotMatch(msg, /额度耗尽|强停/, 'no quota-exhaustion / stop language');
+    assert.ok(pendingDirEmpty(dir), 'a warning (not a stop) writes no pending');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('phasePost: the stale-probe note does NOT pollute the T1 fingerprint dedup', async () => {
+  // staleProbeNote is appended AFTER shouldFire (the fingerprint is keyed on
+  // bucket+reset+threshold, not on the message text), so a T1 message under a
+  // 429 gate must still fire exactly once per window. Locks that ordering against
+  // a future refactor that appends the note before the fingerprint check.
+  const dir = tempDir();
+  try {
+    writeGate(dir, 'claude');
+    writeStaleCache(dir, 'claude', 85); // T1 zone: ≥ warnOnce 80, < warnRepeat 90
+    const call = () => withEnvAsync(
+      { BUDGET_STATE_DIR: dir, BUDGET_NOW_EPOCH: String(NOW), BUDGET_CWD_OVERRIDE: dir },
+      () => phasePost('claude', {}, TH_V32),
+    );
+    const first = await call();
+    const second = await call();
+    const ctx1 = first?.hookSpecificOutput?.additionalContext || '';
+    assert.match(ctx1, /预警线|85%/, 'T1 fires on the first gated-stale poll');
+    assert.match(ctx1, /探针暂被限流/, 'with the stale note appended');
+    assert.equal(second, null, 'identical second poll is deduped — the note did not break the fingerprint');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1368,7 +1468,10 @@ test('phaseStop: checkpoint lead below the 99 hard fuse does not force-stop or w
   }
 });
 
-test('phaseStop: provider rate-limit writes normal pending and force-stops before fail-open return', async () => {
+test('phaseStop: regression — a pure transient 429 (no cache) NO LONGER force-stops or writes pending', async () => {
+  // This previously force-stopped + wrote a handoff pending purely on the 429
+  // gate — the false-stop-at-healthy-quota bug. A probe 429 only gates probe
+  // freshness; with no cached util there is no data, so Stop is fail-open silent.
   const dir = tempDir();
   try {
     mkdirSync(dir, { recursive: true });
@@ -1382,17 +1485,9 @@ test('phaseStop: provider rate-limit writes normal pending and force-stops befor
       () => phaseStop('claude', { session_id: 's-rate' }, TH_V32),
     );
 
-    assert.ok(result && result.continue === false, 'rate-limit stop must force-stop cleanly');
-    assert.match(result.stopReason || '', /限流|rate/i);
-    const pending = readSinglePending(dir, 'claude');
-    assert.equal(pending.status, 'paused');
-    assert.equal(pending.agent, 'claude');
-    assert.equal(pending.session_id, 's-rate');
-    assert.equal(pending.cwd, dir);
-    assert.equal(pending.reset_epoch, 0);
-    assert.equal(pending.util, 0);
-    assert.equal(pending.warn_util, 0);
-    assert.equal(typeof pending.at, 'number');
+    assert.equal(result, null, 'transient 429 with no cache must NOT continue:false');
+    assert.ok(!existsSync(join(dir, 'pending')), 'no handoff pending dir on a transient 429');
+    assert.ok(!existsSync(join(dir, 'pending_claude.json')), 'no legacy pending on a transient 429');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

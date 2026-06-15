@@ -31,7 +31,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `prompt` | UserPromptSubmit | 检测 `/goal /loop /batch /background`,给规划预估(额度充足时出声的主要情形);另外检测**显式跳过短语**(`/budget-skip`/`force-continue`/`跳过硬线`/`强制继续`),命中则写限时 skip marker(不查用量) |
 | `pre` | PreToolUse | checkpoint 提醒线/硬线/可信 runway 收尾保护线只发减速提醒,不 deny;checkpoint 写入与 **skip marker 有效** 时静默放行 |
 | `post` | PostToolUse | 追加一条 burn-rate 历史点;软线/提前 checkpoint 提示收尾(skip 有效时 T3 提示改为「不强停」措辞,且不消耗真实 T3 fingerprint) |
-| `stop` | Stop/SubagentStop | 循环轮末重估;硬线或 provider rate-limit `continue:false` 强停 + 写 `pending/<agent>_<scope>.json` 给 watchdog;**skip marker 有效则不强停、不写 pending** |
+| `stop` | Stop/SubagentStop | 循环轮末重估;**util 硬线** `continue:false` 强停 + 写 `pending/<agent>_<scope>.json` 给 watchdog;**skip marker 有效则不强停、不写 pending**。provider 429/rate-limit **只限流探针刷新(改用 stale 缓存 util 判阈值),绝不单独强停/写 pending** —— 它不是额度耗尽 |
 | `resume` | SessionStart | 有上次 checkpoint 就注入上下文续接 |
 
 **核心不变量(改代码别破坏):**
@@ -43,7 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **数据流 / 状态目录**(默认 `~/.budget-guard/`,`BUDGET_STATE_DIR` 可覆盖):
 - `usage_<agent>.json` —— 用量缓存(`BUDGET_CACHE_TTL` 秒,默认 45;PreToolUse 每次工具调用都跑,必须缓存)。
-- `pending/<agent>_<scope>.json` —— 硬线暂停或 provider rate-limit 时写的待续队列,watchdog/bridge 逐个读它续跑;旧 `pending_<agent>.json` 仅 watchdog 兼容读取。
+- `pending/<agent>_<scope>.json` —— **util 硬线**暂停时写的待续队列(provider 429/rate-limit 不写),watchdog/bridge 逐个读它续跑;旧 `pending_<agent>.json` 仅 watchdog 兼容读取。
 - `skip/<agent>_<scope>.json` —— 手动跳过硬线的限时授权 marker(`{"expires":<epoch>}`);`pre`/`stop` 读它判断是否放行,过期自动清理。
 
 > `hist_<agent>.jsonl`(burn-rate 历史点)仅 Bash 实现(`budget_guard.sh`)写入。Node lib 不写,watchdog 不读。burn-rate 算法是 Bash 专属(`seconds_to_hard()`,纯 awk);Node lib 不实现(P2 待办)。
