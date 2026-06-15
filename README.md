@@ -32,7 +32,7 @@ Agent Quota Guard turns that **random, destructive cut** into a **predictable, c
 | | Behavior |
 |---|---|
 | 🔇 **Silent-first** | Below the warning threshold, it never interrupts you. The only proactive message is the planning estimate when you start a long task. |
-| 📊 **Three tiers** | **T1 (80%)** one heads-up per window · **T2 (90%)** wrap-up nudge every turn · **T3 (92%)** hard stop / park at the round boundary. |
+| 📊 **Three tiers** | **T1 (80%)** one heads-up per window · **T2 (90%)** wrap-up nudge every turn · **checkpoint lead (~95%)** write a checkpoint early · **T3 (99%)** last-resort hard stop / park at the round boundary. |
 | 💾 **Checkpoint loop** | warn → wrap up → write checkpoint → resume across the quota window. |
 | 📈 **Burn-rate forecast** | extrapolates *time-to-limit* from your recent consumption rate, not just the current percentage. |
 | 🛟 **Fail-open** | if it can't read your usage (network / token / schema), it stays silent and lets the agent run — the guard never blocks you because of its own problem. |
@@ -83,7 +83,7 @@ After install, **you don't run anything** — the guard rides along with your no
 
 1. **Start a long task** (e.g. `/goal "refactor the payment module"`). The guard prints a one-time estimate of how far your current quota will carry it.
 2. **Work normally.** It stays quiet until ~80% usage.
-3. **Near the cap** it nudges you to wrap up, then at the hard line it **stops at the end of the current round** and writes a checkpoint (default `.agent/checkpoint.md` in your project).
+3. **Near the cap** it nudges you to write a checkpoint early (~95%), then at the hard line (~99%) it **stops at the end of the current round** and writes a pending resume marker (default checkpoint path: `.agent/checkpoint.md` in your project).
 4. **Resume.** Either:
    - **Interactive (Claude & Codex):** the agent can call the `wait_until_budget_refresh` MCP tool to park in place and continue the same turn once the window refreshes; or
    - you simply send "continue" in a new session — the guard injects the checkpoint context so you don't lose your place; or
@@ -97,6 +97,8 @@ Sometimes you're a few steps from done and would rather push through than stop a
 
 This records a **time-boxed** (default 30 min, `BUDGET_SKIP_TTL`), **per-project** grant: while it's valid the hard line won't emit PreToolUse slowdown reminders or force a round-end stop. It auto-expires and the guard then resumes normal reminders plus clean round-end stops. A plain "continue" never triggers it — the phrase must be explicit. This only delays a *clean* stop; it **cannot** create quota — once the API refuses requests, nothing keeps the agent running.
 
+If you also run AgentBridge's budget pacing, Bridge is the primary policy (it paces toward ~98%). This guard is the outer safety fuse: it still warns early enough for checkpointing and parks at ~99% or on provider 429/rate-limit.
+
 ---
 
 ## Configuration
@@ -107,7 +109,8 @@ All settings are environment variables with sane defaults — you usually don't 
 |---|---|---|
 | `BUDGET_WARN_ONCE` | `80` | T1 — warn once per quota window |
 | `BUDGET_WARN_REPEAT` | `90` | T2 — wrap-up nudge every turn |
-| `BUDGET_HARD` | `92` | T3 — hard stop / park at the round boundary |
+| `BUDGET_CHECKPOINT_LEAD` | dynamic `95` (clamped below `BUDGET_HARD`) | early checkpoint / slowdown reminder |
+| `BUDGET_HARD` | `99` | T3 — last-resort hard stop / park at the round boundary |
 | `BUDGET_SKIP_TTL` | `1800` | seconds a [manual hard-line skip](#need-just-a-little-more-manual-hard-line-skip) stays active |
 | `BUDGET_CACHE_TTL` | `45` | seconds to cache the usage lookup |
 | `BUDGET_CHECKPOINT` | `.agent/checkpoint.md` | checkpoint path (relative to project root) |
@@ -127,12 +130,13 @@ Instead of exporting env vars, you can put safe quota-tuning settings in two opt
 # ~/.budget-guard/config  or  ./.budget-guard.conf
 BUDGET_WARN_ONCE=75
 BUDGET_WARN_REPEAT=88
-BUDGET_HARD=90
+BUDGET_CHECKPOINT_LEAD=94
+BUDGET_HARD=99
 ```
 
 **Precedence (high → low):** environment variable **>** project config **>** global config **>** built-in default. Both files are optional; with neither present, behavior is exactly the built-in defaults.
 
-For safety, config files only accept known safe tuning keys: `BUDGET_WARN_ONCE`, `BUDGET_WARN_REPEAT`, `BUDGET_SOFT`, `BUDGET_HARD`, `BUDGET_CACHE_TTL`, `BUDGET_HIST_WINDOW`, and `BUDGET_CLAUDE_UA`. Command, credential, endpoint, debug-fixture, dispatch, path, and automation keys such as `BUDGET_PROBE`, token variables, `BUDGET_CODEX_URL`, `BUDGET_USAGE_FIXTURE`, `BUDGET_AGENT`, `BUDGET_PHASE`, `BUDGET_STATE_DIR`, `BUDGET_CHECKPOINT`, `BUDGET_WATCHDOG_ARM`, `BUDGET_RESUME_BELOW`, `BUDGET_RESUME_PROMPT`, and `BUDGET_SKIP_TTL` (it governs how long the hard line can be skipped) must be set as explicit process environment variables.
+For safety, config files only accept known safe tuning keys: `BUDGET_WARN_ONCE`, `BUDGET_WARN_REPEAT`, `BUDGET_SOFT`, `BUDGET_CHECKPOINT_LEAD`, `BUDGET_HARD`, `BUDGET_CACHE_TTL`, `BUDGET_HIST_WINDOW`, and `BUDGET_CLAUDE_UA`. Command, credential, endpoint, debug-fixture, dispatch, path, and automation keys such as `BUDGET_PROBE`, token variables, `BUDGET_CODEX_URL`, `BUDGET_USAGE_FIXTURE`, `BUDGET_AGENT`, `BUDGET_PHASE`, `BUDGET_STATE_DIR`, `BUDGET_CHECKPOINT`, `BUDGET_WATCHDOG_ARM`, `BUDGET_RESUME_BELOW`, `BUDGET_RESUME_PROMPT`, and `BUDGET_SKIP_TTL` (it governs how long the hard line can be skipped) must be set as explicit process environment variables.
 
 ---
 
@@ -245,7 +249,7 @@ npx agent-quota-guard codex     # 装到 Codex
 | | 行为 |
 |---|---|
 | 🔇 **静默优先** | 低于提醒线时绝不打扰。唯一主动发声是启动长任务时的规划预估。 |
-| 📊 **三档阈值** | **T1(80%)** 本窗口提醒一次 · **T2(90%)** 每轮提示收尾 · **T3(92%)** 轮末强制停 / park。 |
+| 📊 **三档阈值** | **T1(80%)** 本窗口提醒一次 · **T2(90%)** 每轮提示收尾 · **checkpoint 提醒线(~95%)** 提前写 checkpoint · **T3(99%)** 最后保险丝,轮末强制停 / park。 |
 | 💾 **checkpoint 闭环** | 预警 → 收尾 → 落盘 → 跨额度窗口续接。 |
 | 📈 **burn-rate 预测** | 用最近消耗速率外推「还能跑多久」,不只看当前百分比。 |
 | 🛟 **fail-open** | 查不到用量(网络 / token / 字段对不上)就静默放行 —— 绝不因守卫自身问题卡死 agent。 |
@@ -296,7 +300,7 @@ cd agent-quota-guard
 
 1. **启动长任务**(如 `/goal "重构支付模块"`)。守卫打印一次预估:按现在的额度大概能跑多远。
 2. **正常干活。** 用量到 ~80% 前它保持安静。
-3. **接近上限**时提示你收尾,到硬线时**在当前轮末停下**并写 checkpoint(默认项目里的 `.agent/checkpoint.md`)。
+3. **接近上限**时先在 ~95% 提醒你写 checkpoint,到 ~99% 硬线时**在当前轮末停下**并写待续状态(默认 checkpoint 路径为项目里的 `.agent/checkpoint.md`)。
 4. **续接**,任选:
    - **交互(Claude & Codex):** agent 可调用 `wait_until_budget_refresh` MCP 工具,原地 park 到窗口刷新后**同一轮继续**;或
    - 你在新会话里发一句「继续」 —— 守卫注入 checkpoint 上下文,不丢进度;或
@@ -310,6 +314,8 @@ cd agent-quota-guard
 
 这会记录一个**限时**(默认 30 分钟,由 `BUDGET_SKIP_TTL` 控制)、**按项目作用域**的授权:有效期内硬线不再发 PreToolUse 减速提醒、也不在轮末强停;到期自动恢复正常提醒与轮末干净停。普通的「继续」**不会**触发 —— 短语必须显式。它只是延后一次*干净*的停止,**并不能**凭空变出额度 —— API 一旦拒绝请求,谁也没法让 agent 继续跑。
 
+如果你同时使用 AgentBridge 的预算 pacing,Bridge 才是主策略(目标约 98%)。本 guard 是外层保险丝:仍会在 ~95% 提前催 checkpoint,并在 ~99% 或供应商 429/rate-limit 时写 pending 干净停下。
+
 ---
 
 ## 配置项
@@ -320,7 +326,8 @@ cd agent-quota-guard
 |---|---|---|
 | `BUDGET_WARN_ONCE` | `80` | T1 —— 本额度窗口提醒一次 |
 | `BUDGET_WARN_REPEAT` | `90` | T2 —— 每轮提示收尾 |
-| `BUDGET_HARD` | `92` | T3 —— 轮末强制停 / park |
+| `BUDGET_CHECKPOINT_LEAD` | 动态 `95`(自动压在 `BUDGET_HARD` 以下) | 提前 checkpoint / 减速提醒线 |
+| `BUDGET_HARD` | `99` | T3 —— 最后保险丝,轮末强制停 / park |
 | `BUDGET_SKIP_TTL` | `1800` | [手动跳过硬线](#就差一点点手动跳过硬线)的有效秒数 |
 | `BUDGET_CACHE_TTL` | `45` | 用量查询缓存秒数 |
 | `BUDGET_CHECKPOINT` | `.agent/checkpoint.md` | checkpoint 路径(相对项目根) |
@@ -340,12 +347,13 @@ cd agent-quota-guard
 # ~/.budget-guard/config  或  ./.budget-guard.conf
 BUDGET_WARN_ONCE=75
 BUDGET_WARN_REPEAT=88
-BUDGET_HARD=90
+BUDGET_CHECKPOINT_LEAD=94
+BUDGET_HARD=99
 ```
 
 **优先级(高 → 低):** 环境变量 **>** 项目配置 **>** 全局配置 **>** 内置默认。两份文件都可选;都不存在时行为与内置默认完全一致。
 
-出于安全考虑,配置文件只接受明确安全的调参 key:`BUDGET_WARN_ONCE`、`BUDGET_WARN_REPEAT`、`BUDGET_SOFT`、`BUDGET_HARD`、`BUDGET_CACHE_TTL`、`BUDGET_HIST_WINDOW`、`BUDGET_CLAUDE_UA`。命令、凭据、端点、调试 fixture、调度身份、路径和自动化控制类 key,例如 `BUDGET_PROBE`、token 变量、`BUDGET_CODEX_URL`、`BUDGET_USAGE_FIXTURE`、`BUDGET_AGENT`、`BUDGET_PHASE`、`BUDGET_STATE_DIR`、`BUDGET_CHECKPOINT`、`BUDGET_WATCHDOG_ARM`、`BUDGET_RESUME_BELOW`、`BUDGET_RESUME_PROMPT`,以及 `BUDGET_SKIP_TTL`(它决定硬线能被跳过多久),仍需显式设置为进程环境变量。
+出于安全考虑,配置文件只接受明确安全的调参 key:`BUDGET_WARN_ONCE`、`BUDGET_WARN_REPEAT`、`BUDGET_SOFT`、`BUDGET_CHECKPOINT_LEAD`、`BUDGET_HARD`、`BUDGET_CACHE_TTL`、`BUDGET_HIST_WINDOW`、`BUDGET_CLAUDE_UA`。命令、凭据、端点、调试 fixture、调度身份、路径和自动化控制类 key,例如 `BUDGET_PROBE`、token 变量、`BUDGET_CODEX_URL`、`BUDGET_USAGE_FIXTURE`、`BUDGET_AGENT`、`BUDGET_PHASE`、`BUDGET_STATE_DIR`、`BUDGET_CHECKPOINT`、`BUDGET_WATCHDOG_ARM`、`BUDGET_RESUME_BELOW`、`BUDGET_RESUME_PROMPT`,以及 `BUDGET_SKIP_TTL`(它决定硬线能被跳过多久),仍需显式设置为进程环境变量。
 
 ---
 

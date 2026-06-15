@@ -348,7 +348,7 @@ test('Bash prompt: /budget-skip writes a scoped marker and confirms the grant', 
 test('Bash: an active skip lets pre allow at the hard line and keeps stop from force-stopping', async () => {
   const { root, state, proj, fakeProbe } = await bashScratch();
   try {
-    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe };
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe, BUDGET_HARD: '92' };
 
     // grant (same cwd → same scope as the pre/stop calls below)
     const grant = await runBash([guardPath, 'claude', 'prompt'], {
@@ -376,7 +376,7 @@ test('Bash: an active skip lets pre allow at the hard line and keeps stop from f
 test('Bash: without a skip, the hard line reminds (pre) and force-stops (stop)', async () => {
   const { root, state, proj, fakeProbe } = await bashScratch();
   try {
-    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe };
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe, BUDGET_HARD: '92' };
 
     const pre = await runBash([guardPath, 'claude', 'pre'], { cwd: proj, env, input: BASH_INPUT });
     assert.equal(pre.code, 0, `pre stderr=${pre.stderr}`);
@@ -398,7 +398,7 @@ test('Bash: without a skip, the hard line reminds (pre) and force-stops (stop)',
 test('Bash: an expired skip marker re-enables the hard-line reminder', async () => {
   const { root, state, proj, fakeProbe } = await bashScratch();
   try {
-    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe };
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe, BUDGET_HARD: '92' };
 
     // grant, then corrupt the marker's expiry into the past (deterministic, no sleep)
     const grant = await runBash([guardPath, 'claude', 'prompt'], {
@@ -432,7 +432,7 @@ test('Bash pending payload matches Node schema and writes scoped plus legacy fil
     const nodeScopedName = readdirSync(join(nodeDir, 'pending')).find((f) => /^claude_.*\.json$/.test(f));
     const nodePending = JSON.parse(await readFile(join(nodeDir, 'pending', nodeScopedName), 'utf8'));
 
-    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe };
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: fakeProbe, BUDGET_HARD: '92' };
     const stop = await runBash([guardPath, 'claude', 'stop'], {
       cwd: proj, env, input: JSON.stringify({ session_id: 's1' }),
     });
@@ -455,6 +455,66 @@ test('Bash pending payload matches Node schema and writes scoped plus legacy fil
     assert.deepEqual(bashLegacy, bashPending);
   } finally {
     rmSync(nodeDir, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Bash rate-limit probe result writes the same pending schema and force-stops at Stop', async () => {
+  const { root, state, proj } = await bashScratch();
+  try {
+    const rateProbe = join(root, 'rate-probe');
+    await writeFile(
+      rateProbe,
+      ['#!/usr/bin/env bash', 'printf \'{"ok":false,"error":"rate_limited","rate_limited_until":9999999999,"util":0,"warn_util":0,"reset_epoch":0}\\n\''].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: rateProbe };
+    const stop = await runBash([guardPath, 'claude', 'stop'], {
+      cwd: proj, env, input: JSON.stringify({ session_id: 's-rate' }),
+    });
+    assert.equal(stop.code, 0, `stop stderr=${stop.stderr}`);
+    assert.match(stop.stdout, /"continue":\s*false/, 'rate-limit stop force-stops cleanly');
+    assert.match(stop.stdout, /限流|rate/i, 'stop reason names provider rate-limit');
+
+    const bashScopedName = readdirSync(join(state, 'pending')).find((f) => /^claude_.*\.json$/.test(f));
+    const pending = JSON.parse(await readFile(join(state, 'pending', bashScopedName), 'utf8'));
+    const legacy = JSON.parse(await readFile(join(state, 'pending_claude.json'), 'utf8'));
+    assert.deepEqual(legacy, pending);
+    assert.equal(pending.status, 'paused');
+    assert.equal(pending.agent, 'claude');
+    assert.equal(pending.session_id, 's-rate');
+    assert.equal(realpathSync(pending.cwd), realpathSync(proj));
+    assert.equal(pending.reset_epoch, 0);
+    assert.equal(pending.util, 0);
+    assert.equal(pending.warn_util, 0);
+    assert.equal(typeof pending.at, 'number');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Bash stale cache with active rate-limit still writes pending instead of treating usage as healthy', async () => {
+  const { root, state, proj } = await bashScratch();
+  try {
+    const staleRateProbe = join(root, 'stale-rate-probe');
+    await writeFile(
+      staleRateProbe,
+      ['#!/usr/bin/env bash', 'printf \'{"ok":true,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":95,"warn_util":95,"reset_epoch":0}\\n\''].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: staleRateProbe };
+    const stop = await runBash([guardPath, 'claude', 'stop'], {
+      cwd: proj, env, input: JSON.stringify({ session_id: 's-stale-rate' }),
+    });
+    assert.equal(stop.code, 0, `stop stderr=${stop.stderr}`);
+    assert.match(stop.stdout, /限流|rate/i, 'active rate-limit must win over stale healthy cache');
+    assert.match(stop.stdout, /"continue":\s*false/);
+
+    const bashScopedName = readdirSync(join(state, 'pending')).find((f) => /^claude_.*\.json$/.test(f));
+    const pending = JSON.parse(await readFile(join(state, 'pending', bashScopedName), 'utf8'));
+    assert.equal(pending.session_id, 's-stale-rate');
+    assert.equal(pending.status, 'paused');
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

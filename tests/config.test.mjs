@@ -82,6 +82,7 @@ test("loads global + project, project overrides global, quotes stripped", async 
   await writeFile(join(proj, ".budget-guard.conf"), [
     "BUDGET_HARD=85",
     "BUDGET_WARN_REPEAT='88'",
+    "BUDGET_CHECKPOINT_LEAD=84",
   ].join("\n") + "\n");
 
   const env = { HOME: root, BUDGET_STATE_DIR: state };
@@ -89,6 +90,7 @@ test("loads global + project, project overrides global, quotes stripped", async 
 
   assert.equal(env.BUDGET_WARN_ONCE, "70", "global value applied");
   assert.equal(env.BUDGET_WARN_REPEAT, "88", "project quoted value, quotes stripped");
+  assert.equal(env.BUDGET_CHECKPOINT_LEAD, "84", "checkpoint lead is an allowed tuning key");
   assert.equal(env.BUDGET_HARD, "85", "project overrides global");
   assert.equal(env.BUDGET_CLAUDE_UA, "continue from global", "quotes stripped, spaces kept");
   assert.equal(env.NOT_BUDGET_KEY, undefined, "non-BUDGET key never applied");
@@ -321,7 +323,7 @@ test("Bash guard falls back to default thresholds when config hard is out of ran
   });
 
   assert.equal(result.code, 0, `budget_guard should fail open only on probe issues, stderr=${result.stderr}`);
-  assert.match(result.stdout, /额度已达硬线\(95% ≥ 92%\)/);
+  assert.match(result.stdout, /额度已达 checkpoint 提醒线\(95% ≥ 95%,硬线 99%\)/);
   assert.doesNotMatch(result.stdout, /permissionDecision/);
   assert.match(result.stdout, /不会强制拦截/);
   await rm(root, { recursive: true, force: true });
@@ -361,7 +363,7 @@ test("Bash guard hard-line reminder names the driving Codex usage window", async
   });
 
   assert.equal(result.code, 0, `budget_guard should remind without crashing, stderr=${result.stderr}`);
-  assert.match(result.stdout, /额度已达硬线\(100% ≥ 92%\)/);
+  assert.match(result.stdout, /额度已达硬线\(100% ≥ 99%\)/);
   assert.match(result.stdout, /触发窗口:additional_rate_limits\[GPT_5_Codex\]\.secondary_window/);
   assert.match(result.stdout, /rate_limit\.primary_window=77%/);
   assert.doesNotMatch(result.stdout, /permissionDecision/);
@@ -397,7 +399,7 @@ test("Bash budget-probe emits warn_bucket_id; bucket_id stays the resettable win
   await rm(root, { recursive: true, force: true });
 });
 
-test("Bash guard hard line reminds on warn_util and labels 触发窗口 by warn_bucket_id (parity with Node)", async () => {
+test("Bash guard checkpoint lead reminds on warn_util and labels 触发窗口 by warn_bucket_id (parity with Node)", async () => {
   const { root, state, deep } = await scratch();
   const fakeProbe = join(root, "fake-probe");
   // hard_util=50 (would NOT trip the old .util gate), warn_util=95 (trips it).
@@ -429,7 +431,7 @@ test("Bash guard hard line reminds on warn_util and labels 触发窗口 by warn_
   });
 
   assert.equal(result.code, 0, `budget_guard should remind without crashing, stderr=${result.stderr}`);
-  assert.match(result.stdout, /额度已达硬线\(95% ≥ 92%\)/, "gates + displays warn_util=95, not hard_util=50");
+  assert.match(result.stdout, /额度已达 checkpoint 提醒线\(95% ≥ 95%,硬线 99%\)/, "gates + displays warn_util=95, not hard_util=50");
   assert.match(result.stdout, /触发窗口:rate_limit\.secondary_window/, "labels the warn winner");
   assert.doesNotMatch(result.stdout, /触发窗口:rate_limit\.primary_window/, "not the resettable hard winner");
   assert.doesNotMatch(result.stdout, /permissionDecision/);

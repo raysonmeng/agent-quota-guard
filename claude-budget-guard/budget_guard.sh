@@ -30,7 +30,8 @@ _BGC_SELF_DIR="$(dirname "$0")"
 WARN_ONCE="${BUDGET_WARN_ONCE:-80}"        # T1:本窗口提醒一次
 WARN_REPEAT="${BUDGET_WARN_REPEAT:-${BUDGET_SOFT:-90}}" # T2:每次提醒(BUDGET_SOFT 为旧 alias)
 SOFT="$WARN_REPEAT"                        # 兼容旧变量名
-HARD="${BUDGET_HARD:-92}"                  # T3:轮末强制停/park
+HARD="${BUDGET_HARD:-99}"                  # T3:轮末强制停/park(最后保险丝)
+CHECKPOINT_LEAD="${BUDGET_CHECKPOINT_LEAD:-}" # 提前 checkpoint 提醒线(默认动态约 95)
 CACHE_TTL="${BUDGET_CACHE_TTL:-45}"        # 用量缓存秒
 HIST_WINDOW="${BUDGET_HIST_WINDOW:-900}"   # 速率估算回看窗口(秒,默认 15min)
 CHECKPOINT="${BUDGET_CHECKPOINT:-.agent/checkpoint.md}"
@@ -49,18 +50,27 @@ _bqg_uint_or_default() {
 }
 
 _bqg_validate_thresholds() {
-  local wo="$WARN_ONCE" wr="$WARN_REPEAT" hd="$HARD" invalid=0
+  local wo="$WARN_ONCE" wr="$WARN_REPEAT" hd="$HARD" cl="$CHECKPOINT_LEAD" invalid=0
   [[ "$wo" =~ ^[0-9]+$ ]] || invalid=1
   [[ "$wr" =~ ^[0-9]+$ ]] || invalid=1
   [[ "$hd" =~ ^[0-9]+$ ]] || invalid=1
   if (( invalid == 0 )); then
     wo=$((10#$wo)); wr=$((10#$wr)); hd=$((10#$hd))
-    (( wo < wr && wr < hd && hd <= 100 )) || invalid=1
+    if [[ -z "$cl" ]]; then
+      cl=95
+      (( cl < wr )) && cl="$wr"
+      (( cl >= hd )) && cl=$((hd - 1))
+    elif [[ "$cl" =~ ^[0-9]+$ ]]; then
+      cl=$((10#$cl))
+    else
+      invalid=1
+    fi
+    (( wo < wr && wr <= cl && cl < hd && hd <= 100 )) || invalid=1
   fi
   if (( invalid != 0 )); then
-    WARN_ONCE=80; WARN_REPEAT=90; SOFT=90; HARD=92
+    WARN_ONCE=80; WARN_REPEAT=90; SOFT=90; CHECKPOINT_LEAD=95; HARD=99
   else
-    WARN_ONCE="$wo"; WARN_REPEAT="$wr"; SOFT="$wr"; HARD="$hd"
+    WARN_ONCE="$wo"; WARN_REPEAT="$wr"; SOFT="$wr"; CHECKPOINT_LEAD="$cl"; HARD="$hd"
   fi
 }
 
@@ -127,7 +137,7 @@ fi
 
 # ───────── 取用量:回显 "util reset_epoch"(带缓存)─────────
 fetch_usage() {
-  local cache="$STATE_DIR/usage_${AGENT}.json" now ts token creds resp util reset probed bucket buckets
+  local cache="$STATE_DIR/usage_${AGENT}.json" now ts token creds resp util reset probed bucket buckets rate_until
   now=$(date +%s)
   if [[ -x "$BUDGET_PROBE" ]]; then
     probed=$("$BUDGET_PROBE" --agent "$AGENT" 2>/dev/null || true)
@@ -138,16 +148,21 @@ fetch_usage() {
     reset=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | .reset_epoch // 0' 2>/dev/null || true)
     bucket=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | ((.warn_bucket_id // .bucket_id) // empty | tostring | gsub("[[:space:]]+";"_"))' 2>/dev/null || true)
     buckets=$(printf '%s' "$probed" | jq -r 'select(.ok == true) | [.buckets[]? | select(.util != null) | "\((.id // "unknown") | tostring | gsub("[[:space:]]+";"_"))=\((.util // 0) | floor)%"] | join(",")' 2>/dev/null || true)
+    rate_until=$(printf '%s' "$probed" | jq -r '.rate_limited_until // 0' 2>/dev/null || echo 0)
+    if [[ "$rate_until" =~ ^[0-9]+$ ]] && (( rate_until > now )); then
+      printf '0 0 - - %s' "$rate_until"
+      return
+    fi
     if [[ -n "$util" && "$util" =~ ^[0-9]+$ ]]; then
       [[ "$reset" =~ ^[0-9]+$ ]] || reset=0
-      printf '%s %s %s %s' "$util" "$reset" "${bucket:-"-"}" "${buckets:-"-"}"
+      printf '%s %s %s %s 0' "$util" "$reset" "${bucket:-"-"}" "${buckets:-"-"}"
       return
     fi
   fi
   if [[ -f "$cache" ]]; then
     ts=$(jq -r '.ts // 0' "$cache" 2>/dev/null || echo 0)
     if (( now - ts < CACHE_TTL )); then
-      jq -r '"\(.util) \(.reset // 0)"' "$cache" 2>/dev/null; return
+      jq -r '"\(.util) \(.reset // 0) - - 0"' "$cache" 2>/dev/null; return
     fi
   fi
   case "$AGENT" in
@@ -186,7 +201,7 @@ fetch_usage() {
   # reset 可能是 ISO 字符串或 epoch;非数字就置 0(后面 fallback 估 5h 窗口)
   [[ ! "$reset" =~ ^[0-9]+$ ]] && reset=0
   printf '{"ts":%s,"util":%s,"reset":%s}' "$now" "$util" "$reset" > "$cache" 2>/dev/null || true
-  printf '%s %s' "$util" "$reset"
+  printf '%s %s - - 0' "$util" "$reset"
 }
 
 # ───────── 记录一条速率历史点 ─────────
@@ -244,6 +259,28 @@ usage_detail() {
   [[ -n "$detail" ]] && printf '（%s）' "$detail"
 }
 
+write_pending() {
+  local sid pending_dir key pending_payload
+  sid=$(printf '%s' "$INPUT" | jq -r '.session_id // .thread_id // empty' 2>/dev/null || true)
+  pending_dir="$STATE_DIR/pending"
+  mkdir -p "$pending_dir" 2>/dev/null || true
+  key=$(printf '%s\n%s\n' "$(pwd -P 2>/dev/null || pwd)" "$sid" | cksum | awk '{print $1}')
+  pending_payload=$(jq -n --arg agent "$AGENT" --arg sid "$sid" --arg cwd "$(pwd)" --arg reset "${RESET:-0}" --arg util "${UTIL:-0}" \
+    '{status:"paused", agent:$agent, session_id:$sid, cwd:$cwd, reset_epoch:($reset|tonumber? // 0), util:($util|tonumber? // 0), warn_util:($util|tonumber? // 0), at:(now|floor)}' 2>/dev/null || true)
+  if [[ -n "$pending_payload" ]]; then
+    printf '%s\n' "$pending_payload" > "$pending_dir/${AGENT}_${key}.json" 2>/dev/null || true
+    printf '%s\n' "$pending_payload" > "$STATE_DIR/pending_${AGENT}.json" 2>/dev/null || true
+  fi
+}
+
+rate_limited_active() {
+  [[ "${RATE_LIMITED_UNTIL:-0}" =~ ^[0-9]+$ ]] && (( RATE_LIMITED_UNTIL > $(date +%s) ))
+}
+
+rate_limit_note() {
+  printf '供应商已返回限流(rate-limit/429),守卫已写入待续 pending。请确认当前进度已写进 %s;重试窗口约 %s。额度恢复后由 bridge/watchdog 从 checkpoint 续接。' "$CHECKPOINT" "$(fmt_clock "${RATE_LIMITED_UNTIL:-0}")"
+}
+
 warn_once_should_fire() {
   local reset="$1" scope dir current
   [[ "$reset" =~ ^[0-9]+$ ]] || reset=0
@@ -285,8 +322,9 @@ pause_codex_goal_if_possible() {
 }
 
 # 取用量
-read -r UTIL RESET BUCKET_ID BUCKETS_SUMMARY <<<"$(fetch_usage)"
+read -r UTIL RESET BUCKET_ID BUCKETS_SUMMARY RATE_LIMITED_UNTIL <<<"$(fetch_usage)"
 [[ -z "${UTIL:-}" || ! "$UTIL" =~ ^[0-9]+$ ]] && exit 0   # 查不到 -> 静默放行
+[[ -z "${RATE_LIMITED_UNTIL:-}" ]] && RATE_LIMITED_UNTIL=0
 
 # ───────── prompt:长任务启动预估(唯一「额度充足也提示」的情形)─────────
 if [[ "$PHASE" == "prompt" ]]; then
@@ -318,12 +356,33 @@ ${body}"
   exit 0
 fi
 
+# provider 429 / active Retry-After: write the same pending schema as hard-stop
+# before the usual fail-open/silence path can swallow it.
+if rate_limited_active; then
+  if [[ "$PHASE" == "pre" || "$PHASE" == "post" || "$PHASE" == "stop" ]]; then
+    write_pending
+    rl_note="$(rate_limit_note)"
+    if [[ "$PHASE" == "stop" ]]; then
+      jq -n --arg s "${rl_note} 本轮已干净停下。" '{continue:false, stopReason:$s}'
+    elif [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$rl_note" --arg phase "$([[ "$PHASE" == "pre" ]] && printf PreToolUse || printf PostToolUse)" '{hookSpecificOutput:{hookEventName:$phase, additionalContext:$c}}'
+    else
+      jq -n --arg m "$rl_note" '{systemMessage:$m}'
+    fi
+  fi
+  exit 0
+fi
+
 # ───────── pre:硬线减速提醒,放行写 checkpoint ─────────
 if [[ "$PHASE" == "pre" ]]; then
-  if (( UTIL >= HARD )); then
+  if (( UTIL >= CHECKPOINT_LEAD )); then
     if is_checkpoint_write; then exit 0; fi
     if [[ "$(skip_remaining)" != "0" ]]; then exit 0; fi   # 手动跳过有效 → 静默放行
-    r="额度已达硬线(${UTIL}% ≥ ${HARD}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。请尽快把进度写进 ${CHECKPOINT} 并收尾到干净点;不会强制拦截新工具,但接近供应商限流时可能被外层硬切。刷新约 $(fmt_clock "$RESET")。"
+    if (( UTIL >= HARD )); then
+      r="额度已达硬线(${UTIL}% ≥ ${HARD}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。请尽快把进度写进 ${CHECKPOINT} 并收尾到干净点;不会强制拦截新工具,但接近供应商限流时可能被外层硬切。刷新约 $(fmt_clock "$RESET")。"
+    else
+      r="额度已达 checkpoint 提醒线(${UTIL}% ≥ ${CHECKPOINT_LEAD}%,硬线 ${HARD}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。现在开始把进度写进 ${CHECKPOINT} 并保持收尾节奏;不会强制拦截新工具,但接近供应商限流时可能被外层硬切。刷新约 $(fmt_clock "$RESET")。"
+    fi
     if [[ "$AGENT" == "claude" ]]; then
       jq -n --arg c "$r" '{hookSpecificOutput:{hookEventName:"PreToolUse", additionalContext:$c}}'
     else
@@ -336,7 +395,22 @@ fi
 # ───────── post:记录速率;软线提示收尾 ─────────
 if [[ "$PHASE" == "post" ]]; then
   record_point "$UTIL"
-  if (( UTIL >= WARN_REPEAT && UTIL < HARD )); then
+  if (( UTIL >= HARD )); then
+    note="额度已用 ${UTIL}%≥硬线 ${HARD}%$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY")。本轮 Stop 钩子将强停:立即把进度写进 ${CHECKPOINT},然后等待刷新或交给 watchdog 续跑。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$note" '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}'
+    else
+      jq -n --arg m "$note" '{systemMessage:$m}'
+    fi
+  elif (( UTIL >= CHECKPOINT_LEAD )); then
+    secs=$(seconds_to_hard "$UTIL")
+    note="额度已用 ${UTIL}%≥checkpoint 提醒线 ${CHECKPOINT_LEAD}%(硬线 ${HARD}%),预计还能跑 $(fmt_dur "$secs")。现在开始保持收尾节奏,把进度写进 ${CHECKPOINT};别等 ${HARD}% 保险丝。"
+    if [[ "$AGENT" == "claude" ]]; then
+      jq -n --arg c "$note" '{hookSpecificOutput:{hookEventName:"PostToolUse", additionalContext:$c}}'
+    else
+      jq -n --arg m "$note" '{systemMessage:$m}'
+    fi
+  elif (( UTIL >= WARN_REPEAT )); then
     secs=$(seconds_to_hard "$UTIL")
     note="额度已用 ${UTIL}%(T2 ${WARN_REPEAT}%),预计还能跑 $(fmt_dur "$secs")。收尾手头这步,把进度写进 ${CHECKPOINT} 准备暂停,别等硬线被打断。"
     if [[ "$AGENT" == "claude" ]]; then
@@ -369,18 +443,12 @@ if [[ "$PHASE" == "stop" ]]; then
     fi
     pause_codex_goal_if_possible
     # 写待续状态(watchdog 用)
-    sid=$(printf '%s' "$INPUT" | jq -r '.session_id // .thread_id // empty' 2>/dev/null || true)
-    pending_dir="$STATE_DIR/pending"
-    mkdir -p "$pending_dir" 2>/dev/null || true
-    key=$(printf '%s\n%s\n' "$(pwd -P 2>/dev/null || pwd)" "$sid" | cksum | awk '{print $1}')
-    pending_payload=$(jq -n --arg agent "$AGENT" --arg sid "$sid" --arg cwd "$(pwd)" --arg reset "$RESET" --arg util "$UTIL" \
-      '{status:"paused", agent:$agent, session_id:$sid, cwd:$cwd, reset_epoch:($reset|tonumber? // 0), util:($util|tonumber), warn_util:($util|tonumber), at:(now|floor)}' 2>/dev/null || true)
-    if [[ -n "$pending_payload" ]]; then
-      printf '%s\n' "$pending_payload" > "$pending_dir/${AGENT}_${key}.json" 2>/dev/null || true
-      printf '%s\n' "$pending_payload" > "$STATE_DIR/pending_${AGENT}.json" 2>/dev/null || true
-    fi
+    write_pending
     stop="额度达硬线(${UTIL}%)$(usage_detail "$BUCKET_ID" "$BUCKETS_SUMMARY"),已在本轮末尾干净停下并保存续接点。额度刷新约 $(fmt_clock "$RESET");之后发「继续」或由 watchdog 自动续跑。"
     jq -n --arg s "$stop" '{continue:false, stopReason:$s}'
+  elif (( UTIL >= CHECKPOINT_LEAD )); then
+    secs=$(seconds_to_hard "$UTIL")
+    [[ "$AGENT" == "codex" ]] && jq -n --arg m "额度 ${UTIL}%≥checkpoint 提醒线 ${CHECKPOINT_LEAD}%(硬线 ${HARD}%),预计还能跑 $(fmt_dur "$secs")。建议本轮收尾并写 ${CHECKPOINT}。" '{systemMessage:$m}'
   elif (( UTIL >= WARN_REPEAT )); then
     secs=$(seconds_to_hard "$UTIL")
     jq -n --arg m "额度 ${UTIL}%,预计还能跑 $(fmt_dur "$secs")。建议本轮收尾并写 ${CHECKPOINT}。" '{systemMessage:$m}'
