@@ -178,7 +178,11 @@ test('Node phasePrompt: codex override grant uses systemMessage', async () => {
   }
 });
 
-test('Node phasePrompt: long prompt during active rate-limit writes pending instead of a healthy estimate', async () => {
+test('Node phasePrompt: long prompt under a transient 429 (stale cache) → estimate on cached util + stale note, NO pending', async () => {
+  // Was the bug: a probe 429 made the long-prompt path write a handoff pending +
+  // a quota-exhaustion message. Now a transient 429 only gates probe freshness:
+  // the estimate runs on the stale CACHED util (95%, not a fabricated 0%) and
+  // carries a non-imperative note. No pending is written on a transient 429.
   const dir = tempDir();
   try {
     writeStaleClaudeCache(dir, 95);
@@ -195,21 +199,12 @@ test('Node phasePrompt: long prompt during active rate-limit writes pending inst
     );
 
     const ctx = res?.hookSpecificOutput?.additionalContext || '';
-    assert.match(ctx, /限流|rate-limit/i, 'long prompt surfaces active provider rate-limit');
-    assert.match(ctx, /pending|续接|checkpoint/i, 'long prompt explains pending-based resume');
-    assert.doesNotMatch(ctx, /已用 0%/, 'must not render a fabricated 0% estimate');
-    assert.doesNotMatch(ctx, /额度宽裕/, 'must not claim budget is healthy while rate-limited');
-
-    const { scoped, legacy } = readPendingPair(dir, 'claude');
-    assert.deepEqual(legacy, scoped);
-    assert.equal(scoped.status, 'paused');
-    assert.equal(scoped.agent, 'claude');
-    assert.equal(scoped.session_id, 's-prompt-rate');
-    assert.equal(scoped.cwd, dir);
-    assert.equal(scoped.reset_epoch, NOW + 3600);
-    assert.equal(scoped.util, 95);
-    assert.equal(scoped.warn_util, 95);
-    assert.equal(typeof scoped.at, 'number');
+    assert.match(ctx, /额度预估/, 'long prompt still gives the budget estimate');
+    assert.match(ctx, /95%/, 'estimate uses the stale cached util, not a fabricated 0%');
+    assert.match(ctx, /探针暂被限流/, 'carries the non-imperative stale-probe note');
+    assert.doesNotMatch(ctx, /写入待续 pending|额度恢复后由|强停/, 'no quota-exhaustion / handoff / stop language');
+    assert.equal(existsSync(join(dir, 'pending')), false, 'a transient 429 must NOT write a scoped handoff pending');
+    assert.equal(existsSync(join(dir, 'pending_claude.json')), false, 'no legacy pending on a transient 429');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -546,7 +541,9 @@ test('Bash pending payload matches Node schema and writes scoped plus legacy fil
   }
 });
 
-test('Bash rate-limit probe result writes the same pending schema and force-stops at Stop', async () => {
+test('Bash: pure transient 429 (no cache) fail-opens — Stop does NOT force-stop, no pending', async () => {
+  // Root-cause regression (bash mirror): a probe 429 with no cached util is not
+  // data — it must be fail-open silent, never continue:false / writePending.
   const { root, state, proj } = await bashScratch();
   try {
     const rateProbe = join(root, 'rate-probe');
@@ -560,59 +557,103 @@ test('Bash rate-limit probe result writes the same pending schema and force-stop
       cwd: proj, env, input: JSON.stringify({ session_id: 's-rate' }),
     });
     assert.equal(stop.code, 0, `stop stderr=${stop.stderr}`);
-    assert.match(stop.stdout, /"continue":\s*false/, 'rate-limit stop force-stops cleanly');
-    assert.match(stop.stdout, /限流|rate/i, 'stop reason names provider rate-limit');
-
-    const bashScopedName = readdirSync(join(state, 'pending')).find((f) => /^claude_.*\.json$/.test(f));
-    const pending = JSON.parse(await readFile(join(state, 'pending', bashScopedName), 'utf8'));
-    const legacy = JSON.parse(await readFile(join(state, 'pending_claude.json'), 'utf8'));
-    assert.deepEqual(legacy, pending);
-    assert.equal(pending.status, 'paused');
-    assert.equal(pending.agent, 'claude');
-    assert.equal(pending.session_id, 's-rate');
-    assert.equal(realpathSync(pending.cwd), realpathSync(proj));
-    assert.equal(pending.reset_epoch, 0);
-    assert.equal(pending.util, 0);
-    assert.equal(pending.warn_util, 0);
-    assert.equal(typeof pending.at, 'number');
+    assert.equal(stop.stdout.trim(), '', 'pure probe 429 without cache stays silent at Stop');
+    assert.equal(existsSync(join(state, 'pending')), false, 'no scoped pending on a transient 429');
+    assert.equal(existsSync(join(state, 'pending_claude.json')), false, 'no legacy pending on a transient 429');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('Bash stale cache with active rate-limit still writes pending instead of treating usage as healthy', async () => {
+test('Bash: 429 + healthy stale cache (util 50) stays silent across pre/post/stop, no pending', async () => {
   const { root, state, proj } = await bashScratch();
   try {
     const staleRateProbe = join(root, 'stale-rate-probe');
     await writeFile(
       staleRateProbe,
-      ['#!/usr/bin/env bash', 'printf \'{"ok":true,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":95,"warn_util":95,"reset_epoch":0}\\n\''].join('\n') + '\n',
+      ['#!/usr/bin/env bash', 'printf \'{"ok":false,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":50,"warn_util":50,"reset_epoch":0}\\n\''].join('\n') + '\n',
       { mode: 0o755 },
     );
     const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: staleRateProbe };
-    const stop = await runBash([guardPath, 'claude', 'stop'], {
-      cwd: proj, env, input: JSON.stringify({ session_id: 's-stale-rate' }),
-    });
-    assert.equal(stop.code, 0, `stop stderr=${stop.stderr}`);
-    assert.match(stop.stdout, /限流|rate/i, 'active rate-limit must win over stale healthy cache');
-    assert.match(stop.stdout, /"continue":\s*false/);
-
-    const bashScopedName = readdirSync(join(state, 'pending')).find((f) => /^claude_.*\.json$/.test(f));
-    const pending = JSON.parse(await readFile(join(state, 'pending', bashScopedName), 'utf8'));
-    assert.equal(pending.session_id, 's-stale-rate');
-    assert.equal(pending.status, 'paused');
+    for (const phase of ['pre', 'post', 'stop']) {
+      const res = await runBash([guardPath, 'claude', phase], {
+        cwd: proj, env, input: JSON.stringify({ session_id: `s-stale-${phase}`, tool_name: 'Bash', tool_input: { command: 'true' } }),
+      });
+      assert.equal(res.code, 0, `${phase} stderr=${res.stderr}`);
+      assert.equal(res.stdout.trim(), '', `${phase}: healthy stale util under a 429 gate must stay silent (was the false-stop bug)`);
+    }
+    assert.equal(existsSync(join(state, 'pending')), false, 'healthy stale util under a gate must NOT write pending');
+    assert.equal(existsSync(join(state, 'pending_claude.json')), false, 'no legacy pending');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('Bash prompt: long prompt during active rate-limit writes pending and suppresses healthy estimate', async () => {
+test('Bash: 429 + stale cache does NOT sample frozen util into burn history; prompt still estimates (parity)', async () => {
+  // Locks all three bash-parity fixes in one CI-gated case:
+  //  #1 record_point must skip a 429-gated poll (Node applyBurn excludes stale),
+  //  #2 a long-task prompt still emits the estimate on the cached util,
+  //  #4 the stale cue is the unified "探针暂被限流".
+  const { root, state, proj } = await bashScratch();
+  try {
+    const staleRateProbe = join(root, 'stale-hist-probe');
+    await writeFile(
+      staleRateProbe,
+      ['#!/usr/bin/env bash', 'printf \'{"ok":false,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":50,"warn_util":50,"reset_epoch":0}\\n\''].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: staleRateProbe };
+    const prompt = await runBash([guardPath, 'claude', 'prompt'], {
+      cwd: proj, env, input: JSON.stringify({ prompt: '/goal 长任务', session_id: 's-hist' }),
+    });
+    assert.equal(prompt.code, 0, `prompt stderr=${prompt.stderr}`);
+    // bash's estimate wording ("按当前剩余额度(已用 50%)…") differs from Node's
+    // "[额度预估]" prefix — assert on the util readout common to both, the point
+    // being the estimate is NOT suppressed by the 429 (the #2 fix).
+    assert.match(prompt.stdout, /已用 50%/, '#2: long prompt still emits the estimate on stale cached util');
+    assert.match(prompt.stdout, /探针暂被限流/, '#4: unified stale-probe cue');
+    for (const phase of ['post', 'stop']) {
+      await runBash([guardPath, 'claude', phase], {
+        cwd: proj, env, input: JSON.stringify({ session_id: `s-hist-${phase}`, tool_name: 'Bash', tool_input: { command: 'true' } }),
+      });
+    }
+    assert.equal(existsSync(join(state, 'hist_claude.jsonl')), false, '#1: a 429-gated stale util must NOT be sampled into burn history');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Bash: 429 + HARD stale cache (util ≥ hard) still hard-stops by util threshold (not by the 429)', async () => {
+  const { root, state, proj } = await bashScratch();
+  try {
+    const staleHardProbe = join(root, 'stale-hard-probe');
+    await writeFile(
+      staleHardProbe,
+      ['#!/usr/bin/env bash', 'printf \'{"ok":false,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":95,"warn_util":95,"reset_epoch":9999999999}\\n\''].join('\n') + '\n',
+      { mode: 0o755 },
+    );
+    const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: staleHardProbe, BUDGET_HARD: '92' };
+    const stop = await runBash([guardPath, 'claude', 'stop'], {
+      cwd: proj, env, input: JSON.stringify({ session_id: 's-stale-hard' }),
+    });
+    assert.equal(stop.code, 0, `stop stderr=${stop.stderr}`);
+    assert.match(stop.stdout, /"continue":\s*false/, 'util≥hard still hard-stops even under a gate — util-driven, not 429-driven');
+    assert.ok(existsSync(join(state, 'pending')), 'a genuine util-hard stop still writes pending');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Bash prompt: long prompt under 429 + healthy stale cache → NO pending, no quota-exhaustion language', async () => {
+  // Was the bug: the long-prompt path wrote a handoff pending purely on the 429.
+  // Now a transient 429 only gates probe freshness — no pending is written, and
+  // the old "writes pending / force-stop" language is gone.
   const { root, state, proj } = await bashScratch();
   try {
     const staleRateProbe = join(root, 'prompt-stale-rate-probe');
     await writeFile(
       staleRateProbe,
-      ['#!/usr/bin/env bash', 'printf \'{"ok":true,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":95,"warn_util":95,"reset_epoch":1748853600}\\n\''].join('\n') + '\n',
+      ['#!/usr/bin/env bash', 'printf \'{"ok":false,"stale":true,"source":"cache","rate_limited_until":9999999999,"util":50,"warn_util":50,"reset_epoch":0}\\n\''].join('\n') + '\n',
       { mode: 0o755 },
     );
     const env = { ...process.env, HOME: root, BUDGET_STATE_DIR: state, BUDGET_PROBE: staleRateProbe };
@@ -622,21 +663,9 @@ test('Bash prompt: long prompt during active rate-limit writes pending and suppr
       input: JSON.stringify({ prompt: '/goal 长任务', session_id: 's-bash-prompt-rate' }),
     });
     assert.equal(prompt.code, 0, `prompt stderr=${prompt.stderr}`);
-    assert.match(prompt.stdout, /限流|rate-limit/i, 'long prompt surfaces active provider rate-limit');
-    assert.match(prompt.stdout, /pending|续接|checkpoint/i, 'long prompt explains pending-based resume');
-    assert.doesNotMatch(prompt.stdout, /已用 0%/, 'must not render a fabricated 0% estimate');
-    assert.doesNotMatch(prompt.stdout, /额度宽裕/, 'must not claim budget is healthy while rate-limited');
-
-    const { scoped, legacy } = readPendingPair(state, 'claude');
-    assert.deepEqual(legacy, scoped);
-    assert.equal(scoped.status, 'paused');
-    assert.equal(scoped.agent, 'claude');
-    assert.equal(scoped.session_id, 's-bash-prompt-rate');
-    assert.equal(realpathSync(scoped.cwd), realpathSync(proj));
-    assert.equal(scoped.reset_epoch, 0);
-    assert.equal(scoped.util, 0);
-    assert.equal(scoped.warn_util, 0);
-    assert.equal(typeof scoped.at, 'number');
+    assert.doesNotMatch(prompt.stdout, /写入待续 pending|额度恢复后由|强停/, 'no quota-exhaustion / handoff / stop language on a transient 429');
+    assert.equal(existsSync(join(state, 'pending')), false, 'a transient 429 must NOT write a scoped pending');
+    assert.equal(existsSync(join(state, 'pending_claude.json')), false, 'no legacy pending on a transient 429');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

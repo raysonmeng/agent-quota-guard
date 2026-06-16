@@ -225,7 +225,8 @@ read -r -d '' RULES <<'BLOCK' || true
 - T1 提醒(约 80%):本窗口提醒一次,确认目标能收束。
 - T2 提醒(约 90%):每次提醒时都收尾当前步,把进度写进 .agent/checkpoint.md。
 - checkpoint 提醒线(约 95%):收到提醒就尽快把进度写进 .agent/checkpoint.md,给后续自动续接留足 lead。
-- T3 硬线(约 99%,最后保险丝;轮末被停或 provider rate-limit):收到提醒就写 .agent/checkpoint.md 收尾;轮末停下后不重试、不绕路。只做:① 确认 checkpoint 已写;② 若环境已配置 budget-guard MCP,调用 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
+- T3 硬线(约 99% util,最后保险丝;轮末被停):收到提醒就写 .agent/checkpoint.md 收尾;轮末停下后不重试、不绕路。只做:① 确认 checkpoint 已写;② 若环境已配置 budget-guard MCP,调用 wait_until_budget_refresh 原地等刷新;③ 若不能调用工具,用文字说清续接点并停下。
+- provider 429/rate-limit(探针限流)不是额度耗尽:不会停机、不写 pending。只是探针暂时刷不到新数据 → 改用缓存 util 判阈值,缓存健康就静默。看到「探针暂被限流」照常干活,别误当额度耗尽去停。
 - 开始 /goal /loop /batch 等长任务时会先收到额度预估(还能跑多久、何时刷新)。据此把目标切成 checkpoint 化小块,先做最关键的部分。
 - 新会话带「续接」提示时,从 checkpoint 的「下一步」继续,跳过「已完成」。
 
